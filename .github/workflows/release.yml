@@ -80,39 +80,9 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           GOARM: ${{ matrix.arm }}
-          CGO_ENABLED: 1
         run: |
           # Debug information
           echo "Building for $GOOS/$GOARCH as ${{ env.BINARY_NAME }}"
-          
-          # For complex cross-compilation with CGO, disable it for some targets
-          if [ "${{ matrix.os }}" = "windows" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
-            export CGO_ENABLED=0
-            echo "Disabled CGO for Windows ARM64"
-          fi
-          
-          # Install cross-compilation tools for CGO when needed
-          if [ "$CGO_ENABLED" = "1" ]; then
-            if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
-              sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-              export CC=aarch64-linux-gnu-gcc
-            elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm" ]; then
-              sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
-              export CC=arm-linux-gnueabihf-gcc
-            elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "386" ]; then
-              sudo apt-get update && sudo apt-get install -y gcc-multilib
-              export CC="gcc -m32"
-            elif [ "${{ matrix.os }}" = "windows" ]; then
-              sudo apt-get update
-              if [ "${{ matrix.arch }}" = "amd64" ]; then
-                sudo apt-get install -y gcc-mingw-w64-x86-64
-                export CC=x86_64-w64-mingw32-gcc
-              elif [ "${{ matrix.arch }}" = "386" ]; then
-                sudo apt-get install -y gcc-mingw-w64-i686
-                export CC=i686-w64-mingw32-gcc
-              fi
-            fi
-          fi
           
           # Build with version information
           VERSION=$(git describe --tags --always)
