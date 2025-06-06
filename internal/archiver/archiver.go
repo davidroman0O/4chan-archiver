@@ -16,6 +16,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/corpix/uarand"
+	"github.com/davidroman0O/4chan-archiver/internal/analysis"
 	"github.com/davidroman0O/4chan-archiver/internal/database"
 	"github.com/davidroman0O/4chan-archiver/internal/metadata"
 	_ "github.com/mattn/go-sqlite3"
@@ -1157,22 +1158,32 @@ func countMediaPosts(thread *Thread) int {
 }
 
 func cleanHTMLText(html string) string {
-	// Simple HTML tag removal - you can improve this
-	text := html
-	// Remove common HTML tags
-	replacements := []string{
-		"<br>", "\n",
-		"<br/>", "\n",
-		"<br />", "\n",
-		"&gt;", ">",
-		"&lt;", "<",
-		"&amp;", "&",
-		"&quot;", "\"",
+	if html == "" {
+		return ""
 	}
-	for i := 0; i < len(replacements); i += 2 {
-		text = strings.Replace(text, replacements[i], replacements[i+1], -1)
+
+	// Use the proper conversation analysis parser to preserve >> formatting
+	analyzer := analysis.NewPostAnalyzer()
+	parsed, err := analyzer.ParsePost(0, html) // PostNo doesn't matter for text cleaning
+	if err != nil {
+		// Fallback to basic cleaning if parser fails
+		text := html
+		replacements := []string{
+			"<br>", "\n",
+			"<br/>", "\n",
+			"<br />", "\n",
+			"&gt;", ">",
+			"&lt;", "<",
+			"&amp;", "&",
+			"&quot;", "\"",
+		}
+		for i := 0; i < len(replacements); i += 2 {
+			text = strings.Replace(text, replacements[i], replacements[i+1], -1)
+		}
+		return text
 	}
-	return text
+
+	return parsed.CleanText
 }
 
 func extractReplyNumbers(comment string) []int64 {
