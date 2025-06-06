@@ -19,13 +19,13 @@ var statusCmd = &cobra.Command{
 
 Examples:
   # Check status of a specific thread
-  4chan-archiver status --board pol 123456789
+  4archive status --board pol 123456789
 
   # Check status of multiple threads
-  4chan-archiver status --board b 123456789 987654321
+  4archive status --board b 123456789 987654321
 
   # List all archived threads in a board
-  4chan-archiver status --board pol --list`,
+  4archive status --board pol --list`,
 	RunE: runStatus,
 }
 

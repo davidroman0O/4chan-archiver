@@ -29,16 +29,16 @@ var archiveCmd = &cobra.Command{
 
 Examples:
   # Archive a single thread from /pol/
-  4chan-archiver archive --board pol 123456789
+  4archive archive --board pol 123456789
 
   # Archive multiple threads
-  4chan-archiver archive --board b 123456789 987654321 555666777
+  4archive archive --board b 123456789 987654321 555666777
 
   # Archive with specific content types
-  4chan-archiver archive --board pol --media --posts 123456789
+  4archive archive --board pol --media --posts 123456789
 
   # Archive to specific directory
-  4chan-archiver archive --board pol --output /path/to/archive 123456789`,
+  4archive archive --board pol --output /path/to/archive 123456789`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runArchive,
 }

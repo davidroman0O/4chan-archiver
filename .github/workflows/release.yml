@@ -1,0 +1,217 @@
+name: Build 4archive
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build 4archive
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux builds
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: 386
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: arm
+            arm: 7
+          
+          # macOS builds
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          
+          # Windows builds
+          - os: windows
+            arch: amd64
+          - os: windows
+            arch: 386
+          - os: windows
+            arch: arm64
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          check-latest: true
+      
+      - name: Install dependencies
+        run: go mod download
+      
+      - name: Run tests
+        run: go test -v ./...
+      
+      - name: Set binary name
+        id: binary-name
+        run: |
+          # Base name for the binary
+          BASE_NAME="4archive"
+          
+          # Add OS and architecture to the name
+          FULL_NAME="${BASE_NAME}-${{ matrix.os }}-${{ matrix.arch }}"
+          
+          # Add ARM version suffix if specified
+          if [ "${{ matrix.arm }}" != "" ]; then
+            FULL_NAME="${FULL_NAME}v${{ matrix.arm }}"
+          fi
+          
+          # Add .exe extension for Windows
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            FULL_NAME="${FULL_NAME}.exe"
+          fi
+          
+          echo "BINARY_NAME=${FULL_NAME}" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=${FULL_NAME}" >> $GITHUB_ENV
+        shell: bash
+      
+      - name: Build 4archive
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.arm }}
+          CGO_ENABLED: 1
+        run: |
+          # Debug information
+          echo "Building for $GOOS/$GOARCH as ${{ env.BINARY_NAME }}"
+          
+          # For complex cross-compilation with CGO, disable it for some targets
+          if [ "${{ matrix.os }}" = "windows" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            export CGO_ENABLED=0
+            echo "Disabled CGO for Windows ARM64"
+          fi
+          
+          # Install cross-compilation tools for CGO when needed
+          if [ "$CGO_ENABLED" = "1" ]; then
+            if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+              sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+              export CC=aarch64-linux-gnu-gcc
+            elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm" ]; then
+              sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+              export CC=arm-linux-gnueabihf-gcc
+            elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "386" ]; then
+              sudo apt-get update && sudo apt-get install -y gcc-multilib
+              export CC="gcc -m32"
+            elif [ "${{ matrix.os }}" = "windows" ]; then
+              sudo apt-get update
+              if [ "${{ matrix.arch }}" = "amd64" ]; then
+                sudo apt-get install -y gcc-mingw-w64-x86-64
+                export CC=x86_64-w64-mingw32-gcc
+              elif [ "${{ matrix.arch }}" = "386" ]; then
+                sudo apt-get install -y gcc-mingw-w64-i686
+                export CC=i686-w64-mingw32-gcc
+              fi
+            fi
+          fi
+          
+          # Build with version information
+          VERSION=$(git describe --tags --always)
+          COMMIT=$(git rev-parse HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          # Build the archiver
+          go build \
+            -o ${{ env.BINARY_NAME }} \
+            -v \
+            -ldflags="-X 'main.version=${VERSION}' -X 'main.commit=${COMMIT}' -X 'main.buildTime=${BUILD_TIME}' -s -w" \
+            .
+          
+          # Verify the binary exists
+          ls -la ${{ env.BINARY_NAME }}
+        shell: bash
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.BINARY_NAME }}
+
+  # Create a release when a tag is pushed
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: List downloaded artifacts
+        run: |
+          echo "Contents of artifacts directory:"
+          find artifacts -type f | sort
+      
+      - name: Create Release
+        id: create-release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 4archive ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Build Docker image for releases
+  docker:
+    name: Build Docker Image
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+        if: ${{ secrets.DOCKER_USERNAME != '' }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: davidroman0o/4archive
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ secrets.DOCKER_USERNAME != '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max 

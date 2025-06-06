@@ -20,7 +20,7 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "4chan-archiver",
+	Use:   "4archive",
 	Short: "A comprehensive 4chan thread archiver",
 	Long: `A flexible and controlled 4chan thread archiver that supports:
 - One-time archiving of single or multiple threads
@@ -42,7 +42,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.4chan-archiver.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.4archive.yaml)")
 	rootCmd.PersistentFlags().StringVarP(&outputDir, "output", "o", "", "output directory (default: ~/Documents/4chan-archive)")
 	rootCmd.PersistentFlags().IntVar(&rateLimitMs, "rate-limit", 1000, "rate limit between requests in milliseconds")
 	rootCmd.PersistentFlags().IntVar(&maxRetries, "max-retries", 3, "maximum number of retries for failed requests")
@@ -67,10 +67,10 @@ func initConfig() {
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".4chan-archiver" (without extension).
+		// Search config in home directory with name ".4archive" (without extension).
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".4chan-archiver")
+		viper.SetConfigName(".4archive")
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match

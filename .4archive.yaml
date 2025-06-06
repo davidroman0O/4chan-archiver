@@ -1,0 +1,31 @@
+# 4chan Archiver Configuration File
+# Place this in your home directory as .4archive.yaml
+
+# Default output directory for archived threads
+output: "~/Documents/4chan-archive"
+
+# Rate limiting (milliseconds between requests)
+rate-limit: 1000
+
+# Maximum retries for failed requests
+max-retries: 3
+
+# Maximum concurrent downloads
+concurrency: 3
+
+# Enable verbose logging by default
+verbose: false
+
+# Default board
+board: "pol"
+
+# Content type defaults
+content: true   # Include thread content/posts
+media: true     # Include media files
+posts: true     # Include post text and metadata
+
+# Skip files that already exist
+skip-existing: true
+
+# Custom user agent (leave empty for random)
+user-agent: "" 
