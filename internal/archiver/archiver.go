@@ -19,6 +19,7 @@ import (
 	"github.com/davidroman0O/4chan-archiver/internal/database"
 	"github.com/davidroman0O/4chan-archiver/internal/metadata"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/sethvargo/go-retry"
 	"golang.org/x/time/rate"
 )
 
@@ -80,7 +81,7 @@ type Config struct {
 	SkipExisting   bool
 
 	// Database configuration
-	DatabaseMode string // "memory", "file", or "auto" (auto detects test mode)
+	DatabaseMode string // DatabaseModeMemory, DatabaseModeFile, or DatabaseModeAuto (auto detects test mode)
 
 	// Source configuration
 	Source string // SourceFourChan, SourceArchivedMoe, or SourceAuto
@@ -137,9 +138,20 @@ func New(config *Config) (*Archiver, error) {
 		return nil, fmt.Errorf("output directory is required")
 	}
 
-	// Create HTTP client with timeout
+	// Create HTTP client with timeout and redirect handling (like the working code)
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Allow up to 10 redirects (archived.moe uses redirects for media)
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			// Copy headers to the redirect request
+			for key, val := range via[0].Header {
+				req.Header[key] = val
+			}
+			return nil
+		},
 	}
 
 	// Create rate limiter (requests per second)
@@ -230,7 +242,7 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 	// Archive media
 	if a.config.IncludeMedia {
 		// Create media subdirectory
-		mediaDir := filepath.Join(threadDir, "media")
+		mediaDir := filepath.Join(threadDir, MediaDirName)
 		os.MkdirAll(mediaDir, 0755)
 
 		mediaCount, err := a.downloadMediaToSubdir(thread, mediaDir, meta)
@@ -246,7 +258,7 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 
 	// Create thread.json for analysis compatibility
 	if a.config.IncludeContent {
-		threadJSONPath := filepath.Join(threadDir, "thread.json")
+		threadJSONPath := filepath.Join(threadDir, ThreadJSONFileName)
 		if err := os.WriteFile(threadJSONPath, []byte("{}"), 0644); err == nil {
 			// Convert thread data and save as thread.json
 			threadData, err := json.MarshalIndent(thread, "", "  ")
@@ -268,7 +280,7 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 
 	// Create metadata file
 	if a.config.IncludeContent {
-		metadataPath := filepath.Join(threadDir, ".metadata.json")
+		metadataPath := filepath.Join(threadDir, MetadataFileName)
 		metadata := map[string]interface{}{
 			"thread_id":        threadID,
 			"board":            a.config.Board,
@@ -474,13 +486,10 @@ func (a *Archiver) fetchFromArchivedMoe(threadID string) (*Thread, error) {
 // parseArchivedMoeHTML converts archived.moe HTML to Thread structure
 func (a *Archiver) parseArchivedMoeHTML(doc *goquery.Document, threadID string) (*Thread, error) {
 	thread := &Thread{Posts: []Post{}}
-
-	// Parse posts from the HTML - this is a simplified version
-	// We'll extract media links for now and create minimal post structures
 	postNum := int64(1)
 	threadIDInt, _ := strconv.ParseInt(threadID, 10, 64)
 
-	// Find all image links similar to your .code examples
+	// Find all <a> elements that wrap an <img> element (like in the working code)
 	doc.Find("a").Each(func(i int, s *goquery.Selection) {
 		if s.Find("img").Length() == 0 {
 			return
@@ -491,36 +500,50 @@ func (a *Archiver) parseArchivedMoeHTML(doc *goquery.Document, threadID string) 
 			return
 		}
 
-		// Only process links that appear to be images
+		// Process links to various file types found in 4chan/archived threads
 		lower := strings.ToLower(href)
-		if !strings.Contains(lower, ".jpg") &&
-			!strings.Contains(lower, ".jpeg") &&
-			!strings.Contains(lower, ".png") &&
-			!strings.Contains(lower, ".gif") &&
-			!strings.Contains(lower, ".webp") &&
-			!strings.Contains(lower, ".webm") {
+		isMediaFile := strings.Contains(lower, ".jpg") ||
+			strings.Contains(lower, ".jpeg") ||
+			strings.Contains(lower, ".png") ||
+			strings.Contains(lower, ".gif") ||
+			strings.Contains(lower, ".webp") ||
+			strings.Contains(lower, ".webm") ||
+			strings.Contains(lower, ".mp4") ||
+			strings.Contains(lower, ".pdf") ||
+			strings.Contains(lower, ".txt") ||
+			strings.Contains(lower, ".zip") ||
+			strings.Contains(lower, ".rar") ||
+			strings.Contains(lower, ".7z") ||
+			strings.Contains(lower, ".mp3") ||
+			strings.Contains(lower, ".wav") ||
+			strings.Contains(lower, ".ogg") ||
+			strings.Contains(lower, ".flac") ||
+			strings.Contains(lower, ".swf") ||
+			strings.Contains(lower, ".bmp") ||
+			strings.Contains(lower, ".tiff") ||
+			strings.Contains(lower, ".avif")
+
+		if !isMediaFile {
 			return
 		}
 
-		// Normalize the URL
+		// Normalize the URL (exactly like the working code)
 		if strings.HasPrefix(href, "//") {
 			href = "https:" + href
 		} else if strings.HasPrefix(href, "/") {
-			href = ArchivedMoeBaseURL + href
+			href = "https://archived.moe" + href
 		}
 
-		// Extract filename
+		// Extract filename from the URL
 		parts := strings.Split(href, "/")
 		filename := parts[len(parts)-1]
-
-		// Remove extension for filename without extension
 		ext := filepath.Ext(filename)
 		filenameNoExt := strings.TrimSuffix(filename, ext)
 
 		// Create a minimal post structure for this media
 		post := Post{
 			No:             postNum,
-			Time:           time.Now().Unix(), // archived.moe doesn't provide exact timestamps easily
+			Time:           time.Now().Unix(),
 			Name:           "Anonymous",
 			Tim:            postNum, // Use post number as tim
 			Filename:       filenameNoExt,
@@ -546,7 +569,7 @@ func (a *Archiver) parseArchivedMoeHTML(doc *goquery.Document, threadID string) 
 
 // savePosts saves thread posts to a JSON file
 func (a *Archiver) savePosts(thread *Thread, threadDir string, meta *metadata.ThreadMetadata) error {
-	postsFile := filepath.Join(threadDir, "posts.json")
+	postsFile := filepath.Join(threadDir, PostsJSONFileName)
 
 	// Check if we should skip existing
 	if a.config.SkipExisting {
@@ -577,66 +600,202 @@ func (a *Archiver) savePosts(thread *Thread, threadDir string, meta *metadata.Th
 	return nil
 }
 
-// downloadFile downloads a single file with retries and rate limiting
+// downloadFile downloads a single file with proper retry and backoff logic
 func (a *Archiver) downloadFile(url, localPath string) (int64, error) {
-	// Wait for rate limiter
-	a.limiter.Wait(context.Background())
+	var finalSize int64
+	var finalErr error
+	var attemptCount int
 
-	req, err := http.NewRequest("GET", url, nil)
+	// Use exponential backoff with proper retry logic
+	backoff := retry.WithMaxRetries(uint64(a.config.MaxRetries), retry.NewExponential(2*time.Second))
+
+	err := retry.Do(context.Background(), backoff, func(ctx context.Context) error {
+		attemptCount++
+
+		// Wait for rate limiter before each attempt
+		if err := a.limiter.Wait(ctx); err != nil {
+			return retry.RetryableError(fmt.Errorf("rate limiter wait failed: %w", err))
+		}
+
+		// Create request with realistic browser headers
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("error creating request: %w", err)
+		}
+
+		// Generate realistic browser headers after multiple failures
+		a.setRealisticHeaders(req, attemptCount)
+
+		if a.config.Verbose {
+			fmt.Printf("Attempting download: %s\n", url)
+		}
+
+		resp, err := a.client.Do(req)
+		if err != nil {
+			return retry.RetryableError(fmt.Errorf("request failed: %w", err))
+		}
+		defer resp.Body.Close()
+
+		// Handle different HTTP status codes
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			retryAfter := resp.Header.Get("Retry-After")
+			if retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil {
+					time.Sleep(time.Duration(seconds) * time.Second)
+				}
+			}
+			return retry.RetryableError(fmt.Errorf("rate limited (429)"))
+
+		case http.StatusForbidden:
+			// 403 could be temporary blocking, retry with new UA and extra delay
+			if a.config.Verbose {
+				body, _ := io.ReadAll(resp.Body)
+				fmt.Printf("Received 403 for %s (attempt %d), body: %s\n", url, attemptCount, string(body)[:min(100, len(body))])
+			}
+
+			// Add extra delay for repeated 403s to avoid further triggering rate limits
+			if attemptCount >= 3 {
+				extraDelay := time.Duration(attemptCount*2) * time.Second
+				if a.config.Verbose {
+					fmt.Printf("Adding extra delay of %v after %d 403 responses\n", extraDelay, attemptCount)
+				}
+				time.Sleep(extraDelay)
+			}
+
+			return retry.RetryableError(fmt.Errorf("forbidden (403), retrying with enhanced headers"))
+
+		case http.StatusNotFound:
+			// 404 is permanent, don't retry
+			return fmt.Errorf("not found (404)")
+
+		case http.StatusOK:
+			// Success case, continue processing
+		default:
+			// Other errors are retryable
+			return retry.RetryableError(fmt.Errorf("HTTP %d", resp.StatusCode))
+		}
+
+		// Check if we got HTML redirect page (archived.moe meta refresh)
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/html") || resp.ContentLength < 1000 {
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return retry.RetryableError(fmt.Errorf("error reading response: %w", err))
+			}
+
+			// Check for meta refresh redirect (archived.moe pattern)
+			bodyStr := string(body)
+			if strings.Contains(bodyStr, "meta http-equiv=\"Refresh\"") {
+				start := strings.Index(bodyStr, "url=")
+				if start != -1 {
+					start += 4
+					end := strings.Index(bodyStr[start:], "\"")
+					if end != -1 {
+						actualURL := strings.TrimSpace(bodyStr[start : start+end])
+						if a.config.Verbose {
+							fmt.Printf("Following meta refresh redirect from %s to %s\n", url, actualURL)
+						}
+						// Recursively download from the actual URL
+						size, err := a.downloadFile(actualURL, localPath)
+						if err != nil {
+							return err
+						}
+						finalSize = size
+						return nil
+					}
+				}
+			}
+
+			// Not a redirect, probably an error page
+			return retry.RetryableError(fmt.Errorf("received HTML content: %s", bodyStr[:min(200, len(bodyStr))]))
+		}
+
+		// Create the file for media content
+		out, err := os.Create(localPath)
+		if err != nil {
+			return fmt.Errorf("error creating file: %w", err)
+		}
+		defer out.Close()
+
+		// Copy response body to file
+		size, err := io.Copy(out, resp.Body)
+		if err != nil {
+			return retry.RetryableError(fmt.Errorf("error copying file: %w", err))
+		}
+
+		// Validate downloaded content isn't corrupted HTML
+		if size < 1000 {
+			if data, err := os.ReadFile(localPath); err == nil {
+				contentType := http.DetectContentType(data)
+				if strings.Contains(contentType, "text/") || strings.Contains(contentType, "html") {
+					os.Remove(localPath) // Remove corrupted file
+					return retry.RetryableError(fmt.Errorf("downloaded HTML/text instead of media (size: %d)", size))
+				}
+			}
+		}
+
+		if a.config.Verbose {
+			fmt.Printf("Successfully downloaded %s (%d bytes)\n", url, size)
+		}
+
+		finalSize = size
+		return nil
+	})
+
 	if err != nil {
-		return 0, err
+		finalErr = err
 	}
 
-	// Set user agent
+	return finalSize, finalErr
+}
+
+// setRealisticHeaders sets realistic browser headers, escalating after failures
+func (a *Archiver) setRealisticHeaders(req *http.Request, attemptCount int) {
+	// Always set a user agent
 	userAgent := a.config.UserAgent
 	if userAgent == "" {
 		userAgent = uarand.GetRandom()
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	for attempt := 0; attempt < a.config.MaxRetries; attempt++ {
-		resp, err := a.client.Do(req)
-		if err != nil {
-			if attempt == a.config.MaxRetries-1 {
-				return 0, err
-			}
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
+	// After 2+ failures, add more realistic browser headers
+	if attemptCount >= 2 {
+		// Accept any content type - 4chan/archived threads can have PDFs, videos, archives, etc.
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		req.Header.Set("Cache-Control", "max-age=0")
 
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			if attempt == a.config.MaxRetries-1 {
-				return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
-			}
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
-
-		// Create the file
-		out, err := os.Create(localPath)
-		if err != nil {
-			resp.Body.Close()
-			return 0, err
-		}
-
-		// Copy the file
-		size, err := io.Copy(out, resp.Body)
-		out.Close()
-		resp.Body.Close()
-
-		if err != nil {
-			if attempt == a.config.MaxRetries-1 {
-				return 0, err
-			}
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
-
-		return size, nil
+		// Use appropriate Sec-Fetch headers for media downloads
+		req.Header.Set("Sec-Fetch-Dest", "image") // Most downloads are images
+		req.Header.Set("Sec-Fetch-Mode", "no-cors")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
 	}
 
-	return 0, fmt.Errorf("max retries reached")
+	// After 3+ failures, add referrer and connection headers
+	if attemptCount >= 3 {
+		if strings.Contains(req.URL.Host, "thebarchive.com") {
+			req.Header.Set("Referer", "https://archived.moe/")
+		} else if strings.Contains(req.URL.Host, "archived.moe") {
+			req.Header.Set("Referer", "https://archived.moe/")
+		}
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("DNT", "1")
+	}
+
+	// After 4+ failures, randomize user agent again and add viewport hint
+	if attemptCount >= 4 {
+		req.Header.Set("User-Agent", uarand.GetRandom()) // Force new random UA
+		req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+		req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+	}
+
+	if a.config.Verbose && attemptCount > 1 {
+		fmt.Printf("Attempt %d for %s: using enhanced headers\n", attemptCount, req.URL.String())
+	}
 }
 
 // downloadMediaToSubdir downloads media to the media subdirectory with proper filename format
@@ -652,13 +811,12 @@ func (a *Archiver) downloadMediaToSubdir(thread *Thread, mediaDir string, meta *
 		var filename string
 
 		// Handle different sources
-		if a.config.Source == SourceArchivedMoe {
-			// For archived.moe, the URL structure is different
-			// We store the actual URL in the post data during parsing
+		if a.config.Source == SourceArchivedMoe || post.ArchivedMoeURL != "" {
+			// For archived.moe, use the URL we extracted during HTML parsing
 			if post.ArchivedMoeURL != "" {
 				mediaURL = post.ArchivedMoeURL
 			} else {
-				// Fallback: try to construct archived.moe URL
+				// This shouldn't happen with the new parser, but fallback just in case
 				mediaURL = fmt.Sprintf("%s/%s/%s%s", ArchivedMoeBaseURL, a.config.Board, post.Filename, post.Ext)
 			}
 			filename = fmt.Sprintf("%d_%s%s", post.No, post.Filename, post.Ext)
@@ -710,11 +868,11 @@ func (a *Archiver) performSqlcConversationAnalysis(thread *Thread, threadDir, th
 	// Determine database mode
 	var useMemoryDB bool
 	switch a.config.DatabaseMode {
-	case "memory":
+	case DatabaseModeMemory:
 		useMemoryDB = true
-	case "file":
+	case DatabaseModeFile:
 		useMemoryDB = false
-	case "auto":
+	case DatabaseModeAuto:
 		// Auto-detect test mode
 		useMemoryDB = strings.Contains(threadDir, "_test_") || os.Getenv("GO_TEST_MODE") == "1"
 	default:
@@ -723,7 +881,7 @@ func (a *Archiver) performSqlcConversationAnalysis(thread *Thread, threadDir, th
 	}
 
 	// Set database path
-	dbPath := filepath.Join(threadDir, "thread.db")
+	dbPath := filepath.Join(threadDir, ThreadDBFileName)
 	if useMemoryDB {
 		dbPath = ":memory:"
 	}
@@ -860,7 +1018,7 @@ func (a *Archiver) performSqlcConversationAnalysis(thread *Thread, threadDir, th
 		// Insert media record if post has media
 		if post.Tim != 0 && post.Ext != "" {
 			mediaFilename := fmt.Sprintf("%d_%s%s", post.No, post.Filename, post.Ext)
-			localPath := filepath.Join("media", mediaFilename)
+			localPath := filepath.Join(MediaDirName, mediaFilename)
 
 			_, err = queries.CreateMedia(context.Background(), database.CreateMediaParams{
 				ThreadID:         threadID,
@@ -884,7 +1042,7 @@ func (a *Archiver) performSqlcConversationAnalysis(thread *Thread, threadDir, th
 
 	// For memory databases: copy to disk for validation if needed
 	if useMemoryDB && dbPath == ":memory:" {
-		diskDBPath := filepath.Join(threadDir, "thread.db")
+		diskDBPath := filepath.Join(threadDir, ThreadDBFileName)
 		err = copyMemoryDBToDisk(db, diskDBPath)
 		if err != nil && a.config.Verbose {
 			fmt.Printf("Warning: Failed to copy database to disk: %v\n", err)
@@ -1039,4 +1197,12 @@ func extractReplyNumbers(comment string) []int64 {
 	}
 
 	return replyNumbers
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

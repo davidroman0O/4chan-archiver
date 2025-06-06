@@ -47,14 +47,16 @@ func init() {
 	rootCmd.AddCommand(archiveCmd)
 
 	// Archive-specific flags
-	archiveCmd.Flags().StringVarP(&board, "board", "b", "pol", "board name (pol, b, etc.)")
+	archiveCmd.Flags().StringVarP(&board, "board", "b", archiver.DefaultBoard, "board name (pol, b, etc.)")
 	archiveCmd.Flags().BoolVar(&includeContent, "content", true, "include thread content/posts")
 	archiveCmd.Flags().BoolVar(&includeMedia, "media", true, "include media files (images, videos)")
 	archiveCmd.Flags().BoolVar(&includePosts, "posts", true, "include post text and metadata")
 	archiveCmd.Flags().IntVarP(&maxConcurrency, "concurrency", "c", 3, "maximum concurrent downloads")
 	archiveCmd.Flags().BoolVar(&skipExisting, "skip-existing", true, "skip files that already exist")
-	archiveCmd.Flags().StringVar(&databaseMode, "database-mode", "file", "database mode: 'memory', 'file', or 'auto'")
-	archiveCmd.Flags().StringVar(&source, "source", "4chan", "source: '4chan', 'archived.moe', or 'auto'")
+	archiveCmd.Flags().StringVar(&databaseMode, "database-mode", archiver.DefaultDatabaseMode,
+		"database mode: '"+archiver.DatabaseModeMemory+"', '"+archiver.DatabaseModeFile+"', or '"+archiver.DatabaseModeAuto+"'")
+	archiveCmd.Flags().StringVar(&source, "source", archiver.DefaultSource,
+		"source: '"+archiver.SourceFourChan+"', '"+archiver.SourceArchivedMoe+"', or '"+archiver.SourceAuto+"'")
 
 	// Bind flags to viper
 	viper.BindPFlag("board", archiveCmd.Flags().Lookup("board"))

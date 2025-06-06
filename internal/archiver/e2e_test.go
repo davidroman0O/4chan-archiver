@@ -19,7 +19,7 @@ const (
 	testBThreadID   = "935410578"
 
 	// Test thread known to exist on archived.moe
-	testArchivedMoeThreadID = "123456789" // Replace with actual archived thread ID
+	testArchivedMoeThreadID = "935410578"
 )
 
 func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
@@ -38,7 +38,7 @@ func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
 
 	// Configure the archiver
 	config := Config{
-		Board:          "pol",
+		Board:          BoardPol,
 		OutputDir:      tempDir,
 		RateLimitMs:    500, // Faster for testing
 		MaxRetries:     3,
@@ -49,8 +49,8 @@ func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 3,
 		SkipExisting:   false,
-		DatabaseMode:   "auto",         // Auto-detect test mode for in-memory processing
-		Source:         SourceFourChan, // Test 4chan source
+		DatabaseMode:   DatabaseModeAuto, // Auto-detect test mode for in-memory processing
+		Source:         SourceFourChan,   // Test 4chan source
 	}
 
 	// Create archiver
@@ -82,19 +82,19 @@ func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
 	t.Logf("   Posts saved: %d", result.PostsSaved)
 
 	// Verify directory structure was created
-	threadDir := filepath.Join(tempDir, "pol", threadID)
+	threadDir := filepath.Join(tempDir, BoardPol, threadID)
 	if _, err := os.Stat(threadDir); os.IsNotExist(err) {
 		t.Fatalf("Thread directory not created: %s", threadDir)
 	}
 
 	// Verify thread.json was created
-	threadJSONPath := filepath.Join(threadDir, "thread.json")
+	threadJSONPath := filepath.Join(threadDir, ThreadJSONFileName)
 	if _, err := os.Stat(threadJSONPath); os.IsNotExist(err) {
 		t.Fatalf("thread.json not created: %s", threadJSONPath)
 	}
 
 	// Verify database was created and has conversation analysis
-	dbPath := filepath.Join(threadDir, "thread.db")
+	dbPath := filepath.Join(threadDir, ThreadDBFileName)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Fatalf("Database not created: %s", dbPath)
 	}
@@ -137,7 +137,7 @@ func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
 	}
 
 	// Verify media files were downloaded
-	mediaDir := filepath.Join(threadDir, "media")
+	mediaDir := filepath.Join(threadDir, MediaDirName)
 	if result.MediaDownloaded > 0 {
 		if _, err := os.Stat(mediaDir); os.IsNotExist(err) {
 			t.Errorf("Media directory not created despite downloading %d files", result.MediaDownloaded)
@@ -153,7 +153,7 @@ func TestE2E_CompleteArchiver_PolThread(t *testing.T) {
 	}
 
 	// Verify metadata file was created
-	metadataPath := filepath.Join(threadDir, ".metadata.json")
+	metadataPath := filepath.Join(threadDir, MetadataFileName)
 	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 		t.Fatalf("Metadata file not created: %s", metadataPath)
 	}
@@ -178,7 +178,7 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 
 	// Configure the archiver
 	config := Config{
-		Board:          "b",
+		Board:          BoardB,
 		OutputDir:      tempDir,
 		RateLimitMs:    500, // Faster for testing
 		MaxRetries:     3,
@@ -189,8 +189,8 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 3,
 		SkipExisting:   false,
-		DatabaseMode:   "auto",         // Auto-detect test mode for in-memory processing
-		Source:         SourceFourChan, // Test 4chan source
+		DatabaseMode:   DatabaseModeAuto, // Auto-detect test mode for in-memory processing
+		Source:         SourceFourChan,   // Test 4chan source
 	}
 
 	// Create archiver
@@ -222,13 +222,13 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 	t.Logf("   Posts saved: %d", result.PostsSaved)
 
 	// Verify directory structure was created
-	threadDir := filepath.Join(tempDir, "b", threadID)
+	threadDir := filepath.Join(tempDir, BoardB, threadID)
 	if _, err := os.Stat(threadDir); os.IsNotExist(err) {
 		t.Fatalf("Thread directory not created: %s", threadDir)
 	}
 
 	// Verify thread.json was created and has content
-	threadJSONPath := filepath.Join(threadDir, "thread.json")
+	threadJSONPath := filepath.Join(threadDir, ThreadJSONFileName)
 	if _, err := os.Stat(threadJSONPath); os.IsNotExist(err) {
 		t.Fatalf("thread.json not created: %s", threadJSONPath)
 	}
@@ -250,7 +250,7 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 	}
 
 	// Verify database was created and has conversation analysis
-	dbPath := filepath.Join(threadDir, "thread.db")
+	dbPath := filepath.Join(threadDir, ThreadDBFileName)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Fatalf("Database not created: %s", dbPath)
 	}
@@ -293,7 +293,7 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 	}
 
 	// Verify media files were downloaded (b threads typically have lots of media)
-	mediaDir := filepath.Join(threadDir, "media")
+	mediaDir := filepath.Join(threadDir, MediaDirName)
 	if result.MediaDownloaded > 0 {
 		if _, err := os.Stat(mediaDir); os.IsNotExist(err) {
 			t.Errorf("Media directory not created despite downloading %d files", result.MediaDownloaded)
@@ -320,7 +320,7 @@ func TestE2E_CompleteArchiver_BThread(t *testing.T) {
 	}
 
 	// Verify metadata file was created
-	metadataPath := filepath.Join(threadDir, ".metadata.json")
+	metadataPath := filepath.Join(threadDir, MetadataFileName)
 	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 		t.Fatalf("Metadata file not created: %s", metadataPath)
 	}
@@ -346,7 +346,7 @@ func TestE2E_MultipleThreads(t *testing.T) {
 	// Test archiving both threads with a single archiver call
 	// First test /pol/
 	polConfig := Config{
-		Board:          "pol",
+		Board:          BoardPol,
 		OutputDir:      tempDir,
 		RateLimitMs:    1000,
 		MaxRetries:     3,
@@ -357,8 +357,8 @@ func TestE2E_MultipleThreads(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 2,
 		SkipExisting:   false,
-		DatabaseMode:   "auto",         // Auto-detect test mode for in-memory processing
-		Source:         SourceFourChan, // Test 4chan source
+		DatabaseMode:   DatabaseModeAuto, // Auto-detect test mode for in-memory processing
+		Source:         SourceFourChan,   // Test 4chan source
 	}
 
 	polArchiver, err := New(&polConfig)
@@ -372,7 +372,7 @@ func TestE2E_MultipleThreads(t *testing.T) {
 
 	// Then test /b/
 	bConfig := polConfig
-	bConfig.Board = "b"
+	bConfig.Board = BoardB
 	bArchiver, err := New(&bConfig)
 	if err != nil {
 		t.Fatalf("Failed to create b archiver: %v", err)
@@ -395,8 +395,8 @@ func TestE2E_MultipleThreads(t *testing.T) {
 	}
 
 	// Verify both directory structures exist
-	polDir := filepath.Join(tempDir, "pol", testPolThreadID)
-	bDir := filepath.Join(tempDir, "b", testBThreadID)
+	polDir := filepath.Join(tempDir, BoardPol, testPolThreadID)
+	bDir := filepath.Join(tempDir, BoardB, testBThreadID)
 
 	if _, err := os.Stat(polDir); os.IsNotExist(err) {
 		t.Fatalf("Pol thread directory not created: %s", polDir)
@@ -406,8 +406,8 @@ func TestE2E_MultipleThreads(t *testing.T) {
 	}
 
 	// Verify databases exist and are independent
-	polDB := filepath.Join(polDir, "thread.db")
-	bDB := filepath.Join(bDir, "thread.db")
+	polDB := filepath.Join(polDir, ThreadDBFileName)
+	bDB := filepath.Join(bDir, ThreadDBFileName)
 
 	if _, err := os.Stat(polDB); os.IsNotExist(err) {
 		t.Fatalf("Pol database not created: %s", polDB)
@@ -466,7 +466,7 @@ func TestE2E_ArchivedMoeThread(t *testing.T) {
 
 	// Configure the archiver for archived.moe
 	config := Config{
-		Board:          "b",
+		Board:          BoardB,
 		OutputDir:      tempDir,
 		RateLimitMs:    1000, // Slower for archived.moe to be respectful
 		MaxRetries:     5,    // More retries for archived.moe
@@ -477,7 +477,7 @@ func TestE2E_ArchivedMoeThread(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 1, // Single concurrent download for archived.moe
 		SkipExisting:   false,
-		DatabaseMode:   "auto",            // Auto-detect test mode for in-memory processing
+		DatabaseMode:   DatabaseModeAuto,  // Auto-detect test mode for in-memory processing
 		Source:         SourceArchivedMoe, // Test archived.moe source
 	}
 
@@ -512,13 +512,13 @@ func TestE2E_ArchivedMoeThread(t *testing.T) {
 	t.Logf("   Posts saved: %d", result.PostsSaved)
 
 	// Verify directory structure was created
-	threadDir := filepath.Join(tempDir, "b", archivedThreadID)
+	threadDir := filepath.Join(tempDir, BoardB, archivedThreadID)
 	if _, err := os.Stat(threadDir); os.IsNotExist(err) {
 		t.Fatalf("Thread directory not created: %s", threadDir)
 	}
 
 	// Verify media files were downloaded if any were found
-	mediaDir := filepath.Join(threadDir, "media")
+	mediaDir := filepath.Join(threadDir, MediaDirName)
 	if result.MediaDownloaded > 0 {
 		if _, err := os.Stat(mediaDir); os.IsNotExist(err) {
 			t.Errorf("Media directory not created despite downloading %d files", result.MediaDownloaded)
@@ -569,7 +569,7 @@ func TestE2E_NoFallback_FourChanOnly(t *testing.T) {
 
 	// Configure the archiver for 4chan ONLY
 	config := Config{
-		Board:          "b",
+		Board:          BoardB,
 		OutputDir:      tempDir,
 		RateLimitMs:    500,
 		MaxRetries:     1, // Fewer retries for this test
@@ -580,7 +580,7 @@ func TestE2E_NoFallback_FourChanOnly(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 1,
 		SkipExisting:   false,
-		DatabaseMode:   "auto",
+		DatabaseMode:   DatabaseModeAuto,
 		Source:         SourceFourChan, // EXPLICIT 4chan source - should NOT fallback
 	}
 
@@ -638,7 +638,7 @@ func TestE2E_NoFallback_ArchivedMoeOnly(t *testing.T) {
 
 	// Configure the archiver for archived.moe ONLY
 	config := Config{
-		Board:          "pol",
+		Board:          BoardPol,
 		OutputDir:      tempDir,
 		RateLimitMs:    1000,
 		MaxRetries:     2, // Fewer retries for this test
@@ -649,7 +649,7 @@ func TestE2E_NoFallback_ArchivedMoeOnly(t *testing.T) {
 		IncludePosts:   true,
 		MaxConcurrency: 1,
 		SkipExisting:   false,
-		DatabaseMode:   "auto",
+		DatabaseMode:   DatabaseModeAuto,
 		Source:         SourceArchivedMoe, // EXPLICIT archived.moe source - should NOT fallback to 4chan
 	}
 
