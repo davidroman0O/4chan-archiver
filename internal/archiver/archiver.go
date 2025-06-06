@@ -203,9 +203,8 @@ func (a *Archiver) ArchiveThreads(threadIDs []string) (map[string]ArchiveResult,
 func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 	result := ArchiveResult{ThreadID: threadID}
 
-	if a.config.Verbose {
-		fmt.Printf("Starting archive of thread %s from /%s/\n", threadID, a.config.Board)
-	}
+	// Always show basic progress
+	fmt.Printf("Archiving thread %s from /%s/...\n", threadID, a.config.Board)
 
 	// Load metadata
 	meta, err := a.metadataManager.LoadMetadata(a.config.Board, threadID)
@@ -301,9 +300,8 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 		fmt.Printf("Warning: failed to save metadata for thread %s: %v\n", threadID, err)
 	}
 
-	if a.config.Verbose {
-		fmt.Printf("Completed archive of thread %s\n", threadID)
-	}
+	// Always show completion
+	fmt.Printf("✓ Completed thread %s: %d posts, %d media files\n", threadID, result.PostsSaved, result.MediaDownloaded)
 
 	return result
 }
@@ -802,11 +800,25 @@ func (a *Archiver) setRealisticHeaders(req *http.Request, attemptCount int) {
 func (a *Archiver) downloadMediaToSubdir(thread *Thread, mediaDir string, meta *metadata.ThreadMetadata) (int, error) {
 	downloaded := 0
 
+	// Count total media files to download
+	totalMedia := 0
+	for _, post := range thread.Posts {
+		if post.Tim != 0 && post.Ext != "" {
+			totalMedia++
+		}
+	}
+
+	if totalMedia > 0 {
+		fmt.Printf("Found %d media files to download\n", totalMedia)
+	}
+
+	currentFile := 0
 	for _, post := range thread.Posts {
 		if post.Tim == 0 || post.Ext == "" {
 			continue // No media file
 		}
 
+		currentFile++
 		var mediaURL string
 		var filename string
 
@@ -846,9 +858,8 @@ func (a *Archiver) downloadMediaToSubdir(thread *Thread, mediaDir string, meta *
 			}
 		}
 
-		if a.config.Verbose {
-			fmt.Printf("Downloading media: %s\n", mediaURL)
-		}
+		// Show download progress with counter
+		fmt.Printf("[%d/%d] Downloading: %s\n", currentFile, totalMedia, filename)
 
 		size, err := a.downloadFile(mediaURL, localPath)
 		if err != nil {
