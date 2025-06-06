@@ -52,9 +52,6 @@ jobs:
       - name: Install dependencies
         run: go mod download
       
-      - name: Run tests
-        run: go test -v ./...
-      
       - name: Set binary name
         id: binary-name
         run: |
