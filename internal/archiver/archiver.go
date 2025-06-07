@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -96,12 +97,39 @@ type ArchiveResult struct {
 	Error           error
 }
 
+// MonitorConfig holds configuration for thread monitoring
+type MonitorConfig struct {
+	ThreadIDs        []string // Changed from ThreadID to ThreadIDs to support multiple threads
+	Interval         time.Duration
+	MaxDuration      time.Duration
+	StopOnArchive    bool
+	StopOnInactivity time.Duration
+}
+
+// MonitorState tracks the current state of thread monitoring
+type MonitorState struct {
+	LastPostNo     int64
+	LastPostTime   int64
+	LastCheckTime  time.Time
+	TotalChecks    int
+	NewPostsFound  int
+	NewMediaFound  int
+	IsActive       bool
+	ThreadArchived bool
+	LastActivity   time.Time
+}
+
 // Archiver handles the archiving process
 type Archiver struct {
 	config          *Config
 	client          *http.Client
 	limiter         *rate.Limiter
 	metadataManager *metadata.Manager
+
+	// Monitoring state
+	stopMonitoring int64 // atomic flag
+	monitorState   *MonitorState
+	monitorMutex   sync.RWMutex
 }
 
 // Thread represents a 4chan thread JSON structure
@@ -374,7 +402,8 @@ func (a *Archiver) fetchFromFourChan(threadID string) (*Thread, error) {
 			continue
 		}
 
-		err = json.NewDecoder(resp.Body).Decode(&thread)
+		// Read the response body to check for error messages
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			if attempt == a.config.MaxRetries-1 {
@@ -382,6 +411,36 @@ func (a *Archiver) fetchFromFourChan(threadID string) (*Thread, error) {
 			}
 			time.Sleep(time.Duration(attempt+1) * time.Second)
 			continue
+		}
+
+		// Check for common 4chan error responses
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "Nothing Found") ||
+			strings.Contains(bodyStr, "404 Not Found") ||
+			strings.Contains(bodyStr, "Thread not found") ||
+			strings.Contains(bodyStr, "Thread does not exist") ||
+			len(bodyStr) < 10 { // Empty or very short response
+			return nil, fmt.Errorf("thread not found - response: %s", bodyStr[:min(100, len(bodyStr))])
+		}
+
+		// Try to decode JSON
+		err = json.Unmarshal(body, &thread)
+		if err != nil {
+			// If JSON decode fails, it might be an HTML error page
+			if strings.Contains(bodyStr, "<html>") || strings.Contains(bodyStr, "<!DOCTYPE") {
+				return nil, fmt.Errorf("received HTML error page instead of JSON - thread likely doesn't exist")
+			}
+
+			if attempt == a.config.MaxRetries-1 {
+				return nil, fmt.Errorf("JSON decode error: %w - response: %s", err, bodyStr[:min(200, len(bodyStr))])
+			}
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+			continue
+		}
+
+		// Validate that we got actual thread data
+		if len(thread.Posts) == 0 {
+			return nil, fmt.Errorf("thread has no posts - likely deleted or archived")
 		}
 
 		break
@@ -1227,4 +1286,489 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// MonitorThreads continuously monitors multiple 4chan threads for new posts and media
+func (a *Archiver) MonitorThreads(config *MonitorConfig) error {
+	if len(config.ThreadIDs) == 0 {
+		return fmt.Errorf("at least one thread ID is required for monitoring")
+	}
+
+	// Validate threads exist before starting monitoring
+	fmt.Printf("🔍 Validating %d thread(s) before starting monitoring...\n", len(config.ThreadIDs))
+	validThreads := []string{}
+
+	for i, threadID := range config.ThreadIDs {
+		fmt.Printf("📋 [%d/%d] Checking thread %s...", i+1, len(config.ThreadIDs), threadID)
+
+		_, err := a.fetchThread(threadID)
+		if err != nil {
+			fmt.Printf(" ❌ FAILED\n")
+			fmt.Printf("   └─ %v\n", err)
+
+			// Check if it's a "not found" error
+			if strings.Contains(err.Error(), "not found") ||
+				strings.Contains(err.Error(), "Nothing Found") ||
+				strings.Contains(err.Error(), "404") ||
+				strings.Contains(err.Error(), "doesn't exist") ||
+				strings.Contains(err.Error(), "HTML error page") {
+				fmt.Printf("   └─ 🗑️  Thread does not exist, skipping\n")
+				continue
+			}
+
+			// For other errors, warn but continue (might be temporary)
+			fmt.Printf("   └─ ⚠️  Error fetching thread (might be temporary), skipping\n")
+			continue
+		}
+
+		fmt.Printf(" ✅ OK\n")
+		validThreads = append(validThreads, threadID)
+	}
+
+	if len(validThreads) == 0 {
+		return fmt.Errorf("no valid threads found to monitor")
+	}
+
+	if len(validThreads) != len(config.ThreadIDs) {
+		fmt.Printf("⚠️  Will monitor %d out of %d threads (others were invalid)\n", len(validThreads), len(config.ThreadIDs))
+	}
+
+	// Update config with only valid threads
+	config.ThreadIDs = validThreads
+
+	// For single thread, use the existing MonitorThread method
+	if len(config.ThreadIDs) == 1 {
+		singleConfig := &MonitorConfig{
+			ThreadIDs:        []string{config.ThreadIDs[0]},
+			Interval:         config.Interval,
+			MaxDuration:      config.MaxDuration,
+			StopOnArchive:    config.StopOnArchive,
+			StopOnInactivity: config.StopOnInactivity,
+		}
+		return a.monitorSingleThread(config.ThreadIDs[0], singleConfig)
+	}
+
+	// For multiple threads, monitor them concurrently
+	fmt.Printf("🚀 Starting concurrent monitoring of %d valid threads\n", len(config.ThreadIDs))
+
+	atomic.StoreInt64(&a.stopMonitoring, 0)
+
+	// Create a wait group for all monitor goroutines
+	var wg sync.WaitGroup
+	errorChan := make(chan error, len(config.ThreadIDs))
+
+	// Start monitoring each thread in its own goroutine
+	for i, threadID := range config.ThreadIDs {
+		wg.Add(1)
+		go func(id string, index int) {
+			defer wg.Done()
+
+			fmt.Printf("📡 [Thread %d/%d] Starting monitor for thread %s\n", index+1, len(config.ThreadIDs), id)
+
+			singleConfig := &MonitorConfig{
+				ThreadIDs:        []string{id},
+				Interval:         config.Interval,
+				MaxDuration:      config.MaxDuration,
+				StopOnArchive:    config.StopOnArchive,
+				StopOnInactivity: config.StopOnInactivity,
+			}
+
+			err := a.monitorSingleThread(id, singleConfig)
+			if err != nil {
+				errorChan <- fmt.Errorf("thread %s: %w", id, err)
+			} else {
+				fmt.Printf("✅ [Thread %d/%d] Completed monitoring thread %s\n", index+1, len(config.ThreadIDs), id)
+			}
+		}(threadID, i)
+	}
+
+	// Wait for all monitoring to complete
+	go func() {
+		wg.Wait()
+		close(errorChan)
+	}()
+
+	// Collect any errors
+	var errors []error
+	for err := range errorChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		fmt.Printf("⚠️  %d thread(s) completed with errors:\n", len(errors))
+		for _, err := range errors {
+			fmt.Printf("  - %v\n", err)
+		}
+		return fmt.Errorf("monitoring completed with %d errors", len(errors))
+	}
+
+	fmt.Printf("🎉 All %d threads monitored successfully\n", len(config.ThreadIDs))
+	return nil
+}
+
+// monitorSingleThread handles monitoring a single thread (refactored from MonitorThread)
+func (a *Archiver) monitorSingleThread(threadID string, config *MonitorConfig) error {
+	atomic.StoreInt64(&a.stopMonitoring, 0)
+
+	// Validate interval
+	if config.Interval <= 0 {
+		config.Interval = 1 * time.Second // Default to 1 second if invalid
+		if a.config.Verbose {
+			fmt.Printf("⚠️  [%s] Invalid interval, using default 1 second\n", threadID)
+		}
+	}
+
+	// Initialize monitoring state for this thread
+	a.monitorMutex.Lock()
+	a.monitorState = &MonitorState{
+		LastCheckTime: time.Now(),
+		IsActive:      true,
+		LastActivity:  time.Now(),
+	}
+	a.monitorMutex.Unlock()
+
+	// Load existing thread data to determine starting point
+	existing, err := a.loadExistingThreadData(threadID)
+	if err == nil && existing != nil {
+		a.monitorMutex.Lock()
+		a.monitorState.LastPostNo = a.getHighestPostNo(existing)
+		a.monitorState.LastPostTime = a.getLatestPostTime(existing)
+		a.monitorMutex.Unlock()
+		if a.config.Verbose {
+			fmt.Printf("📄 [%s] Resuming monitoring from post #%d\n", threadID, a.monitorState.LastPostNo)
+		}
+	} else {
+		if a.config.Verbose {
+			fmt.Printf("🆕 [%s] Starting fresh monitoring\n", threadID)
+		}
+	}
+
+	// Create ticker for periodic checks
+	ticker := time.NewTicker(config.Interval)
+	defer ticker.Stop()
+
+	// Start time for duration limiting
+	startTime := time.Now()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Check if we should stop monitoring
+			if atomic.LoadInt64(&a.stopMonitoring) != 0 {
+				if a.config.Verbose {
+					fmt.Printf("🛑 [%s] Monitor stop requested\n", threadID)
+				}
+				return nil
+			}
+
+			// Check max duration limit
+			if config.MaxDuration > 0 && time.Since(startTime) > config.MaxDuration {
+				fmt.Printf("⏰ [%s] Maximum monitoring duration (%v) reached\n", threadID, config.MaxDuration)
+				return nil
+			}
+
+			// Check inactivity timeout
+			a.monitorMutex.RLock()
+			lastActivity := a.monitorState.LastActivity
+			threadArchived := a.monitorState.ThreadArchived
+			a.monitorMutex.RUnlock()
+
+			if config.StopOnInactivity > 0 && time.Since(lastActivity) > config.StopOnInactivity {
+				fmt.Printf("💤 [%s] No new activity for %v, stopping monitor\n", threadID, config.StopOnInactivity)
+				return nil
+			}
+
+			if threadArchived && config.StopOnArchive {
+				fmt.Printf("📦 [%s] Thread has been archived, stopping monitor\n", threadID)
+				return nil
+			}
+
+			// Perform monitoring check
+			err := a.performSingleThreadCheck(threadID, config)
+			if err != nil {
+				// Check if it's a permanent error (thread doesn't exist)
+				if strings.Contains(err.Error(), "thread no longer exists") {
+					fmt.Printf("🗑️ [%s] Thread no longer exists, stopping monitor\n", threadID)
+					return nil
+				}
+
+				if a.config.Verbose {
+					fmt.Printf("❌ [%s] Monitoring check failed: %v\n", threadID, err)
+				}
+
+				// If thread returns 404, it's been deleted/archived
+				if strings.Contains(err.Error(), "404") ||
+					strings.Contains(err.Error(), "not found") ||
+					strings.Contains(err.Error(), "Nothing Found") ||
+					strings.Contains(err.Error(), "doesn't exist") ||
+					strings.Contains(err.Error(), "HTML error page") {
+					a.monitorMutex.Lock()
+					a.monitorState.ThreadArchived = true
+					a.monitorMutex.Unlock()
+
+					if config.StopOnArchive {
+						fmt.Printf("🗑️ [%s] Thread has been deleted/archived, stopping monitor\n", threadID)
+						return nil
+					}
+				}
+
+				// Continue monitoring despite other errors (might be temporary)
+				continue
+			}
+
+		default:
+			// Non-blocking check for stop signal
+			if atomic.LoadInt64(&a.stopMonitoring) != 0 {
+				if a.config.Verbose {
+					fmt.Printf("🛑 [%s] Monitor stop requested\n", threadID)
+				}
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// MonitorThread maintains backwards compatibility for single thread monitoring
+func (a *Archiver) MonitorThread(config *MonitorConfig) error {
+	if len(config.ThreadIDs) == 0 {
+		return fmt.Errorf("thread ID is required for monitoring")
+	}
+	return a.monitorSingleThread(config.ThreadIDs[0], config)
+}
+
+// StopMonitoring signals the monitoring loop to stop gracefully
+func (a *Archiver) StopMonitoring() {
+	atomic.StoreInt64(&a.stopMonitoring, 1)
+}
+
+// loadExistingThreadData attempts to load existing thread data
+func (a *Archiver) loadExistingThreadData(threadID string) (*Thread, error) {
+	threadDir := filepath.Join(a.config.OutputDir, a.config.Board, threadID)
+	postsFile := filepath.Join(threadDir, PostsJSONFileName)
+
+	if _, err := os.Stat(postsFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(postsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var thread Thread
+	err = json.Unmarshal(data, &thread)
+	if err != nil {
+		return nil, err
+	}
+
+	return &thread, nil
+}
+
+// findNewPosts returns posts with post numbers higher than lastPostNo
+func (a *Archiver) findNewPosts(thread *Thread, lastPostNo int64) []Post {
+	var newPosts []Post
+
+	for _, post := range thread.Posts {
+		if post.No > lastPostNo {
+			newPosts = append(newPosts, post)
+		}
+	}
+
+	return newPosts
+}
+
+// countNewMedia counts posts with media attachments
+func (a *Archiver) countNewMedia(posts []Post) int {
+	count := 0
+	for _, post := range posts {
+		if post.Tim != 0 && post.Ext != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// getHighestPostNo returns the highest post number in the thread
+func (a *Archiver) getHighestPostNo(thread *Thread) int64 {
+	var highest int64
+	for _, post := range thread.Posts {
+		if post.No > highest {
+			highest = post.No
+		}
+	}
+	return highest
+}
+
+// getLatestPostTime returns the latest post timestamp in the thread
+func (a *Archiver) getLatestPostTime(thread *Thread) int64 {
+	var latest int64
+	for _, post := range thread.Posts {
+		if post.Time > latest {
+			latest = post.Time
+		}
+	}
+	return latest
+}
+
+// archiveNewContent archives only the new posts and their media
+func (a *Archiver) archiveNewContent(threadID string, fullThread *Thread, newPosts []Post) error {
+	if len(newPosts) == 0 {
+		return nil
+	}
+
+	// Create thread directory if it doesn't exist
+	threadDir := filepath.Join(a.config.OutputDir, a.config.Board, threadID)
+	if err := os.MkdirAll(threadDir, 0755); err != nil {
+		return fmt.Errorf("failed to create thread directory: %w", err)
+	}
+
+	// Load metadata
+	meta, err := a.metadataManager.LoadMetadata(a.config.Board, threadID)
+	if err != nil {
+		meta, _ = a.metadataManager.LoadMetadata(a.config.Board, threadID) // Create new if doesn't exist
+	}
+
+	// Update posts file with full thread data (incremental update)
+	if a.config.IncludePosts {
+		if err := a.savePosts(fullThread, threadDir, meta); err != nil {
+			fmt.Printf("Warning: Failed to save posts: %v\n", err)
+		}
+	}
+
+	// Download new media files only
+	if a.config.IncludeMedia {
+		mediaDir := filepath.Join(threadDir, MediaDirName)
+		os.MkdirAll(mediaDir, 0755)
+
+		newMediaCount := 0
+		for i, post := range newPosts {
+			if post.Tim == 0 || post.Ext == "" {
+				continue
+			}
+
+			fmt.Printf("📁 [%d/%d] Downloading new media: %s%s\n", i+1, len(newPosts), post.Filename, post.Ext)
+
+			var mediaURL string
+			var filename string
+
+			if a.config.Source == SourceArchivedMoe || post.ArchivedMoeURL != "" {
+				if post.ArchivedMoeURL != "" {
+					mediaURL = post.ArchivedMoeURL
+				} else {
+					mediaURL = fmt.Sprintf("%s/%s/%s%s", ArchivedMoeBaseURL, a.config.Board, post.Filename, post.Ext)
+				}
+				filename = fmt.Sprintf("%d_%s%s", post.No, post.Filename, post.Ext)
+			} else {
+				mediaURL = fmt.Sprintf("%s/%s/%d%s", FourChanMediaBaseURL, a.config.Board, post.Tim, post.Ext)
+				filename = fmt.Sprintf("%d_%s%s", post.No, post.Filename, post.Ext)
+			}
+
+			localPath := filepath.Join(mediaDir, filename)
+
+			// Skip if already exists
+			if _, err := os.Stat(localPath); err == nil && a.config.SkipExisting {
+				continue
+			}
+
+			size, err := a.downloadFile(mediaURL, localPath)
+			if err != nil {
+				fmt.Printf("❌ [%s] Failed to download %s: %v\n", threadID, mediaURL, err)
+				continue
+			}
+
+			meta.AddDownloadedMedia(mediaURL, filename, size)
+			newMediaCount++
+		}
+
+		fmt.Printf("📥 [%s] Downloaded %d new media files\n", threadID, newMediaCount)
+	}
+
+	// Update database with new posts (incremental update)
+	if a.config.IncludePosts {
+		err = a.performSqlcConversationAnalysis(fullThread, threadDir, threadID)
+		if err != nil {
+			fmt.Printf("Warning: [%s] Failed to update conversation analysis: %v\n", threadID, err)
+		}
+	}
+
+	// Save updated metadata
+	if err := a.metadataManager.SaveMetadata(meta); err != nil {
+		fmt.Printf("Warning: [%s] Failed to save metadata: %v\n", threadID, err)
+	}
+
+	return nil
+}
+
+// performSingleThreadCheck checks for new posts and downloads new content for a single thread
+func (a *Archiver) performSingleThreadCheck(threadID string, config *MonitorConfig) error {
+	a.monitorMutex.Lock()
+	checkNum := a.monitorState.TotalChecks + 1
+	a.monitorState.TotalChecks = checkNum
+	a.monitorState.LastCheckTime = time.Now()
+	a.monitorMutex.Unlock()
+
+	if a.config.Verbose {
+		fmt.Printf("🔍 [%s] [Check #%d] Fetching thread...\n", threadID, checkNum)
+	}
+
+	// Fetch current thread state
+	thread, err := a.fetchThread(threadID)
+	if err != nil {
+		// Check if it's a permanent error (thread doesn't exist)
+		if strings.Contains(err.Error(), "not found") ||
+			strings.Contains(err.Error(), "Nothing Found") ||
+			strings.Contains(err.Error(), "404") ||
+			strings.Contains(err.Error(), "doesn't exist") ||
+			strings.Contains(err.Error(), "HTML error page") ||
+			strings.Contains(err.Error(), "no posts") {
+
+			// Mark as archived and stop monitoring
+			a.monitorMutex.Lock()
+			a.monitorState.ThreadArchived = true
+			a.monitorMutex.Unlock()
+
+			return fmt.Errorf("thread no longer exists: %w", err)
+		}
+
+		// For other errors, return as retryable
+		return fmt.Errorf("failed to fetch thread: %w", err)
+	}
+
+	// Find new posts since last check
+	a.monitorMutex.RLock()
+	lastPostNo := a.monitorState.LastPostNo
+	a.monitorMutex.RUnlock()
+
+	newPosts := a.findNewPosts(thread, lastPostNo)
+	newMedia := a.countNewMedia(newPosts)
+
+	if len(newPosts) == 0 {
+		if a.config.Verbose {
+			fmt.Printf("📭 [%s] No new posts found\n", threadID)
+		}
+		return nil
+	}
+
+	fmt.Printf("📬 [%s] Found %d new posts, %d with media\n", threadID, len(newPosts), newMedia)
+
+	// Update monitoring state
+	a.monitorMutex.Lock()
+	a.monitorState.NewPostsFound += len(newPosts)
+	a.monitorState.NewMediaFound += newMedia
+	a.monitorState.LastActivity = time.Now()
+	if len(newPosts) > 0 {
+		a.monitorState.LastPostNo = a.getHighestPostNo(thread)
+		a.monitorState.LastPostTime = a.getLatestPostTime(thread)
+	}
+	a.monitorMutex.Unlock()
+
+	// Archive the new content incrementally
+	err = a.archiveNewContent(threadID, thread, newPosts)
+	if err != nil {
+		return fmt.Errorf("failed to archive new content: %w", err)
+	}
+
+	fmt.Printf("✅ [%s] Archived %d new posts with %d media files\n", threadID, len(newPosts), newMedia)
+	return nil
 }
