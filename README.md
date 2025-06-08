@@ -123,7 +123,7 @@ View archiving status and metadata:
 | `--media` | Include media files | `true` |
 | `--posts` | Include post text and metadata | `true` |
 | `--skip-existing` | Skip files that already exist | `true` |
-| `--source` | Source: '4chan', 'archived.moe', or 'auto' | `4chan` |
+| `--source` | Source: '4chan', 'archived.moe', or 'auto' | `auto` |
 | `--database-mode` | Database mode: 'memory', 'file', or 'auto' | `file` |
 
 #### Monitor-Specific Flags

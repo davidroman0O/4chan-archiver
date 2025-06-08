@@ -65,7 +65,7 @@ const (
 const (
 	DefaultDatabaseMode = DatabaseModeFile
 	DefaultBoard        = BoardPol
-	DefaultSource       = SourceFourChan
+	DefaultSource       = SourceAuto
 )
 
 // Config holds configuration for the archiver
