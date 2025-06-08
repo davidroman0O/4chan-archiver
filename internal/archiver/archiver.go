@@ -343,13 +343,26 @@ func (a *Archiver) fetchThread(threadID string) (*Thread, error) {
 	case SourceArchivedMoe:
 		return a.fetchFromArchivedMoe(threadID)
 	case SourceAuto:
-		// Try 4chan first, then archived.moe if 404
+		// Try 4chan first, then archived.moe if it fails
 		thread, err := a.fetchFromFourChan(threadID)
-		if err != nil && strings.Contains(err.Error(), "thread not found (404)") {
-			if a.config.Verbose {
-				fmt.Printf("Thread %s not found on 4chan, trying archived.moe...\n", threadID)
+		if err != nil {
+			// Check for various errors that suggest the thread might be available on archived.moe
+			errorStr := strings.ToLower(err.Error())
+			shouldTryArchived := strings.Contains(errorStr, "thread not found (404)") ||
+				strings.Contains(errorStr, "http 403") ||
+				strings.Contains(errorStr, "http 404") ||
+				strings.Contains(errorStr, "forbidden") ||
+				strings.Contains(errorStr, "not found") ||
+				strings.Contains(errorStr, "thread does not exist") ||
+				strings.Contains(errorStr, "thread has no posts") ||
+				strings.Contains(errorStr, "received html error page")
+
+			if shouldTryArchived {
+				if a.config.Verbose {
+					fmt.Printf("Thread %s not found on 4chan, trying archived.moe...\n", threadID)
+				}
+				return a.fetchFromArchivedMoe(threadID)
 			}
-			return a.fetchFromArchivedMoe(threadID)
 		}
 		return thread, err
 	default:
