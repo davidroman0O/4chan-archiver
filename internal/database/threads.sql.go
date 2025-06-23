@@ -13,16 +13,18 @@ import (
 
 const createThread = `-- name: CreateThread :one
 INSERT INTO threads (
-    thread_id, board, subject, created_at, last_updated, posts_count, media_count, status
+    thread_id, board, subject, source, source_url, created_at, last_updated, posts_count, media_count, status
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?
-) RETURNING id, thread_id, board, subject, created_at, last_updated, posts_count, media_count, status
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+) RETURNING id, thread_id, board, subject, source, source_url, created_at, last_updated, posts_count, media_count, status
 `
 
 type CreateThreadParams struct {
 	ThreadID    string         `json:"thread_id"`
 	Board       string         `json:"board"`
 	Subject     sql.NullString `json:"subject"`
+	Source      string         `json:"source"`
+	SourceUrl   sql.NullString `json:"source_url"`
 	CreatedAt   time.Time      `json:"created_at"`
 	LastUpdated time.Time      `json:"last_updated"`
 	PostsCount  sql.NullInt64  `json:"posts_count"`
@@ -35,6 +37,8 @@ func (q *Queries) CreateThread(ctx context.Context, arg CreateThreadParams) (Thr
 		arg.ThreadID,
 		arg.Board,
 		arg.Subject,
+		arg.Source,
+		arg.SourceUrl,
 		arg.CreatedAt,
 		arg.LastUpdated,
 		arg.PostsCount,
@@ -47,6 +51,8 @@ func (q *Queries) CreateThread(ctx context.Context, arg CreateThreadParams) (Thr
 		&i.ThreadID,
 		&i.Board,
 		&i.Subject,
+		&i.Source,
+		&i.SourceUrl,
 		&i.CreatedAt,
 		&i.LastUpdated,
 		&i.PostsCount,
@@ -57,7 +63,7 @@ func (q *Queries) CreateThread(ctx context.Context, arg CreateThreadParams) (Thr
 }
 
 const getThread = `-- name: GetThread :one
-SELECT id, thread_id, board, subject, created_at, last_updated, posts_count, media_count, status FROM threads 
+SELECT id, thread_id, board, subject, source, source_url, created_at, last_updated, posts_count, media_count, status FROM threads 
 WHERE thread_id = ? AND board = ?
 `
 
@@ -74,6 +80,8 @@ func (q *Queries) GetThread(ctx context.Context, arg GetThreadParams) (Thread, e
 		&i.ThreadID,
 		&i.Board,
 		&i.Subject,
+		&i.Source,
+		&i.SourceUrl,
 		&i.CreatedAt,
 		&i.LastUpdated,
 		&i.PostsCount,
@@ -106,7 +114,7 @@ func (q *Queries) GetThreadStats(ctx context.Context, board string) (GetThreadSt
 }
 
 const listThreads = `-- name: ListThreads :many
-SELECT id, thread_id, board, subject, created_at, last_updated, posts_count, media_count, status FROM threads
+SELECT id, thread_id, board, subject, source, source_url, created_at, last_updated, posts_count, media_count, status FROM threads
 WHERE board = ?
 ORDER BY last_updated DESC
 `
@@ -125,6 +133,8 @@ func (q *Queries) ListThreads(ctx context.Context, board string) ([]Thread, erro
 			&i.ThreadID,
 			&i.Board,
 			&i.Subject,
+			&i.Source,
+			&i.SourceUrl,
 			&i.CreatedAt,
 			&i.LastUpdated,
 			&i.PostsCount,

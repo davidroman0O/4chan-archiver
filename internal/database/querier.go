@@ -11,8 +11,10 @@ import (
 type Querier interface {
 	CountMediaByThread(ctx context.Context, arg CountMediaByThreadParams) (int64, error)
 	CountPostsByThread(ctx context.Context, arg CountPostsByThreadParams) (int64, error)
+	CountQuotesByThread(ctx context.Context, arg CountQuotesByThreadParams) (int64, error)
 	CreateMedia(ctx context.Context, arg CreateMediaParams) (Medium, error)
 	CreatePost(ctx context.Context, arg CreatePostParams) (Post, error)
+	CreateQuote(ctx context.Context, arg CreateQuoteParams) (Quote, error)
 	CreateReply(ctx context.Context, arg CreateReplyParams) error
 	CreateThread(ctx context.Context, arg CreateThreadParams) (Thread, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
@@ -20,6 +22,7 @@ type Querier interface {
 	GetConversationTree(ctx context.Context, arg GetConversationTreeParams) ([]GetConversationTreeRow, error)
 	GetDownloadedMedia(ctx context.Context, arg GetDownloadedMediaParams) ([]Medium, error)
 	GetFailedDownloads(ctx context.Context, board string) ([]Medium, error)
+	GetGreentextByThread(ctx context.Context, arg GetGreentextByThreadParams) ([]GetGreentextByThreadRow, error)
 	GetMedia(ctx context.Context, arg GetMediaParams) (Medium, error)
 	GetMediaByPost(ctx context.Context, arg GetMediaByPostParams) ([]Medium, error)
 	GetMediaByThread(ctx context.Context, arg GetMediaByThreadParams) ([]Medium, error)
@@ -28,6 +31,8 @@ type Querier interface {
 	GetPost(ctx context.Context, arg GetPostParams) (Post, error)
 	GetPostsByThread(ctx context.Context, arg GetPostsByThreadParams) ([]Post, error)
 	GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) ([]Post, error)
+	GetQuotesByPost(ctx context.Context, arg GetQuotesByPostParams) ([]Quote, error)
+	GetQuotesByThread(ctx context.Context, arg GetQuotesByThreadParams) ([]Quote, error)
 	GetRecentPosts(ctx context.Context, arg GetRecentPostsParams) ([]Post, error)
 	GetRepliesFrom(ctx context.Context, arg GetRepliesFromParams) ([]GetRepliesFromRow, error)
 	GetRepliesTo(ctx context.Context, arg GetRepliesToParams) ([]GetRepliesToRow, error)
@@ -40,6 +45,7 @@ type Querier interface {
 	ListThreads(ctx context.Context, board string) ([]Thread, error)
 	ReplyExists(ctx context.Context, arg ReplyExistsParams) (int64, error)
 	SearchPosts(ctx context.Context, arg SearchPostsParams) ([]Post, error)
+	SearchQuotes(ctx context.Context, arg SearchQuotesParams) ([]SearchQuotesRow, error)
 	UpdateMediaStatus(ctx context.Context, arg UpdateMediaStatusParams) error
 	UpdateThread(ctx context.Context, arg UpdateThreadParams) error
 	UpdateUser(ctx context.Context, arg UpdateUserParams) error

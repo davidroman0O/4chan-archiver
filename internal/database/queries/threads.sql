@@ -1,8 +1,8 @@
 -- name: CreateThread :one
 INSERT INTO threads (
-    thread_id, board, subject, created_at, last_updated, posts_count, media_count, status
+    thread_id, board, subject, source, source_url, created_at, last_updated, posts_count, media_count, status
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING *;
 
 -- name: GetThread :one

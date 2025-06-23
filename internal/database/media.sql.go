@@ -30,25 +30,31 @@ func (q *Queries) CountMediaByThread(ctx context.Context, arg CountMediaByThread
 const createMedia = `-- name: CreateMedia :one
 INSERT INTO media (
     thread_id, board, post_no, filename, original_filename, file_ext, 
-    file_size, width, height, md5_hash, local_path, download_status
+    file_size, width, height, md5_hash, media_type, source_url, thumbnail_url,
+    local_path, download_status, download_attempts, last_download_attempt
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-) RETURNING id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+) RETURNING id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at
 `
 
 type CreateMediaParams struct {
-	ThreadID         string         `json:"thread_id"`
-	Board            string         `json:"board"`
-	PostNo           int64          `json:"post_no"`
-	Filename         string         `json:"filename"`
-	OriginalFilename sql.NullString `json:"original_filename"`
-	FileExt          sql.NullString `json:"file_ext"`
-	FileSize         sql.NullInt64  `json:"file_size"`
-	Width            sql.NullInt64  `json:"width"`
-	Height           sql.NullInt64  `json:"height"`
-	Md5Hash          sql.NullString `json:"md5_hash"`
-	LocalPath        sql.NullString `json:"local_path"`
-	DownloadStatus   sql.NullString `json:"download_status"`
+	ThreadID            string         `json:"thread_id"`
+	Board               string         `json:"board"`
+	PostNo              int64          `json:"post_no"`
+	Filename            string         `json:"filename"`
+	OriginalFilename    sql.NullString `json:"original_filename"`
+	FileExt             sql.NullString `json:"file_ext"`
+	FileSize            sql.NullInt64  `json:"file_size"`
+	Width               sql.NullInt64  `json:"width"`
+	Height              sql.NullInt64  `json:"height"`
+	Md5Hash             sql.NullString `json:"md5_hash"`
+	MediaType           sql.NullString `json:"media_type"`
+	SourceUrl           sql.NullString `json:"source_url"`
+	ThumbnailUrl        sql.NullString `json:"thumbnail_url"`
+	LocalPath           sql.NullString `json:"local_path"`
+	DownloadStatus      sql.NullString `json:"download_status"`
+	DownloadAttempts    sql.NullInt64  `json:"download_attempts"`
+	LastDownloadAttempt sql.NullTime   `json:"last_download_attempt"`
 }
 
 func (q *Queries) CreateMedia(ctx context.Context, arg CreateMediaParams) (Medium, error) {
@@ -63,8 +69,13 @@ func (q *Queries) CreateMedia(ctx context.Context, arg CreateMediaParams) (Mediu
 		arg.Width,
 		arg.Height,
 		arg.Md5Hash,
+		arg.MediaType,
+		arg.SourceUrl,
+		arg.ThumbnailUrl,
 		arg.LocalPath,
 		arg.DownloadStatus,
+		arg.DownloadAttempts,
+		arg.LastDownloadAttempt,
 	)
 	var i Medium
 	err := row.Scan(
@@ -79,15 +90,20 @@ func (q *Queries) CreateMedia(ctx context.Context, arg CreateMediaParams) (Mediu
 		&i.Width,
 		&i.Height,
 		&i.Md5Hash,
+		&i.MediaType,
+		&i.SourceUrl,
+		&i.ThumbnailUrl,
 		&i.LocalPath,
 		&i.DownloadStatus,
+		&i.DownloadAttempts,
+		&i.LastDownloadAttempt,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getDownloadedMedia = `-- name: GetDownloadedMedia :many
-SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at FROM media 
+SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at FROM media 
 WHERE board = ? AND download_status = 'downloaded'
 ORDER BY created_at DESC
 LIMIT ?
@@ -119,8 +135,13 @@ func (q *Queries) GetDownloadedMedia(ctx context.Context, arg GetDownloadedMedia
 			&i.Width,
 			&i.Height,
 			&i.Md5Hash,
+			&i.MediaType,
+			&i.SourceUrl,
+			&i.ThumbnailUrl,
 			&i.LocalPath,
 			&i.DownloadStatus,
+			&i.DownloadAttempts,
+			&i.LastDownloadAttempt,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -137,7 +158,7 @@ func (q *Queries) GetDownloadedMedia(ctx context.Context, arg GetDownloadedMedia
 }
 
 const getFailedDownloads = `-- name: GetFailedDownloads :many
-SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at FROM media 
+SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at FROM media 
 WHERE board = ? AND download_status = 'failed'
 ORDER BY created_at DESC
 `
@@ -163,8 +184,13 @@ func (q *Queries) GetFailedDownloads(ctx context.Context, board string) ([]Mediu
 			&i.Width,
 			&i.Height,
 			&i.Md5Hash,
+			&i.MediaType,
+			&i.SourceUrl,
+			&i.ThumbnailUrl,
 			&i.LocalPath,
 			&i.DownloadStatus,
+			&i.DownloadAttempts,
+			&i.LastDownloadAttempt,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -181,7 +207,7 @@ func (q *Queries) GetFailedDownloads(ctx context.Context, board string) ([]Mediu
 }
 
 const getMedia = `-- name: GetMedia :one
-SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at FROM media 
+SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at FROM media 
 WHERE thread_id = ? AND board = ? AND post_no = ? AND filename = ?
 `
 
@@ -212,15 +238,20 @@ func (q *Queries) GetMedia(ctx context.Context, arg GetMediaParams) (Medium, err
 		&i.Width,
 		&i.Height,
 		&i.Md5Hash,
+		&i.MediaType,
+		&i.SourceUrl,
+		&i.ThumbnailUrl,
 		&i.LocalPath,
 		&i.DownloadStatus,
+		&i.DownloadAttempts,
+		&i.LastDownloadAttempt,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getMediaByPost = `-- name: GetMediaByPost :many
-SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at FROM media 
+SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at FROM media 
 WHERE thread_id = ? AND board = ? AND post_no = ?
 `
 
@@ -251,8 +282,13 @@ func (q *Queries) GetMediaByPost(ctx context.Context, arg GetMediaByPostParams) 
 			&i.Width,
 			&i.Height,
 			&i.Md5Hash,
+			&i.MediaType,
+			&i.SourceUrl,
+			&i.ThumbnailUrl,
 			&i.LocalPath,
 			&i.DownloadStatus,
+			&i.DownloadAttempts,
+			&i.LastDownloadAttempt,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -269,7 +305,7 @@ func (q *Queries) GetMediaByPost(ctx context.Context, arg GetMediaByPostParams) 
 }
 
 const getMediaByThread = `-- name: GetMediaByThread :many
-SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, local_path, download_status, created_at FROM media 
+SELECT id, thread_id, board, post_no, filename, original_filename, file_ext, file_size, width, height, md5_hash, media_type, source_url, thumbnail_url, local_path, download_status, download_attempts, last_download_attempt, created_at FROM media 
 WHERE thread_id = ? AND board = ?
 ORDER BY post_no ASC
 `
@@ -300,8 +336,13 @@ func (q *Queries) GetMediaByThread(ctx context.Context, arg GetMediaByThreadPara
 			&i.Width,
 			&i.Height,
 			&i.Md5Hash,
+			&i.MediaType,
+			&i.SourceUrl,
+			&i.ThumbnailUrl,
 			&i.LocalPath,
 			&i.DownloadStatus,
+			&i.DownloadAttempts,
+			&i.LastDownloadAttempt,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err

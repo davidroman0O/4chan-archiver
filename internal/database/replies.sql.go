@@ -165,7 +165,7 @@ func (q *Queries) GetMostRepliedPosts(ctx context.Context, arg GetMostRepliedPos
 }
 
 const getRepliesFrom = `-- name: GetRepliesFrom :many
-SELECT r.id, r.thread_id, r.board, r.from_post, r.to_post, r.reply_type, r.created_at, p.clean_text as to_text 
+SELECT r.id, r.thread_id, r.board, r.from_post, r.to_post, r.reply_type, r.context, r.created_at, p.clean_text as to_text 
 FROM replies r
 JOIN posts p ON r.to_post = p.post_no AND r.thread_id = p.thread_id AND r.board = p.board
 WHERE r.thread_id = ? AND r.board = ? AND r.from_post = ?
@@ -185,6 +185,7 @@ type GetRepliesFromRow struct {
 	FromPost  int64          `json:"from_post"`
 	ToPost    int64          `json:"to_post"`
 	ReplyType string         `json:"reply_type"`
+	Context   sql.NullString `json:"context"`
 	CreatedAt time.Time      `json:"created_at"`
 	ToText    sql.NullString `json:"to_text"`
 }
@@ -205,6 +206,7 @@ func (q *Queries) GetRepliesFrom(ctx context.Context, arg GetRepliesFromParams) 
 			&i.FromPost,
 			&i.ToPost,
 			&i.ReplyType,
+			&i.Context,
 			&i.CreatedAt,
 			&i.ToText,
 		); err != nil {
@@ -222,7 +224,7 @@ func (q *Queries) GetRepliesFrom(ctx context.Context, arg GetRepliesFromParams) 
 }
 
 const getRepliesTo = `-- name: GetRepliesTo :many
-SELECT r.id, r.thread_id, r.board, r.from_post, r.to_post, r.reply_type, r.created_at, p.clean_text as from_text 
+SELECT r.id, r.thread_id, r.board, r.from_post, r.to_post, r.reply_type, r.context, r.created_at, p.clean_text as from_text 
 FROM replies r
 JOIN posts p ON r.from_post = p.post_no AND r.thread_id = p.thread_id AND r.board = p.board
 WHERE r.thread_id = ? AND r.board = ? AND r.to_post = ?
@@ -242,6 +244,7 @@ type GetRepliesToRow struct {
 	FromPost  int64          `json:"from_post"`
 	ToPost    int64          `json:"to_post"`
 	ReplyType string         `json:"reply_type"`
+	Context   sql.NullString `json:"context"`
 	CreatedAt time.Time      `json:"created_at"`
 	FromText  sql.NullString `json:"from_text"`
 }
@@ -262,6 +265,7 @@ func (q *Queries) GetRepliesTo(ctx context.Context, arg GetRepliesToParams) ([]G
 			&i.FromPost,
 			&i.ToPost,
 			&i.ReplyType,
+			&i.Context,
 			&i.CreatedAt,
 			&i.FromText,
 		); err != nil {

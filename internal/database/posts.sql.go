@@ -29,38 +29,44 @@ func (q *Queries) CountPostsByThread(ctx context.Context, arg CountPostsByThread
 
 const createPost = `-- name: CreatePost :one
 INSERT INTO posts (
-    thread_id, board, post_no, timestamp, name, user_id, 
+    thread_id, board, post_no, timestamp, name, tripcode, user_id, 
     country, country_name, flag, flag_name, subject, comment, clean_text,
-    filename, file_ext, file_size, image_width, image_height, 
-    thumbnail_width, thumbnail_height, md5_hash, is_op
+    content_hash, source, parsing_status, filename, file_ext, file_size, 
+    image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, 
+    is_op, has_media_processed
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-) RETURNING id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+) RETURNING id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at
 `
 
 type CreatePostParams struct {
-	ThreadID        string         `json:"thread_id"`
-	Board           string         `json:"board"`
-	PostNo          int64          `json:"post_no"`
-	Timestamp       int64          `json:"timestamp"`
-	Name            string         `json:"name"`
-	UserID          sql.NullString `json:"user_id"`
-	Country         sql.NullString `json:"country"`
-	CountryName     sql.NullString `json:"country_name"`
-	Flag            sql.NullString `json:"flag"`
-	FlagName        sql.NullString `json:"flag_name"`
-	Subject         sql.NullString `json:"subject"`
-	Comment         sql.NullString `json:"comment"`
-	CleanText       sql.NullString `json:"clean_text"`
-	Filename        sql.NullString `json:"filename"`
-	FileExt         sql.NullString `json:"file_ext"`
-	FileSize        sql.NullInt64  `json:"file_size"`
-	ImageWidth      sql.NullInt64  `json:"image_width"`
-	ImageHeight     sql.NullInt64  `json:"image_height"`
-	ThumbnailWidth  sql.NullInt64  `json:"thumbnail_width"`
-	ThumbnailHeight sql.NullInt64  `json:"thumbnail_height"`
-	Md5Hash         sql.NullString `json:"md5_hash"`
-	IsOp            sql.NullBool   `json:"is_op"`
+	ThreadID          string         `json:"thread_id"`
+	Board             string         `json:"board"`
+	PostNo            int64          `json:"post_no"`
+	Timestamp         int64          `json:"timestamp"`
+	Name              string         `json:"name"`
+	Tripcode          sql.NullString `json:"tripcode"`
+	UserID            sql.NullString `json:"user_id"`
+	Country           sql.NullString `json:"country"`
+	CountryName       sql.NullString `json:"country_name"`
+	Flag              sql.NullString `json:"flag"`
+	FlagName          sql.NullString `json:"flag_name"`
+	Subject           sql.NullString `json:"subject"`
+	Comment           sql.NullString `json:"comment"`
+	CleanText         sql.NullString `json:"clean_text"`
+	ContentHash       sql.NullString `json:"content_hash"`
+	Source            string         `json:"source"`
+	ParsingStatus     string         `json:"parsing_status"`
+	Filename          sql.NullString `json:"filename"`
+	FileExt           sql.NullString `json:"file_ext"`
+	FileSize          sql.NullInt64  `json:"file_size"`
+	ImageWidth        sql.NullInt64  `json:"image_width"`
+	ImageHeight       sql.NullInt64  `json:"image_height"`
+	ThumbnailWidth    sql.NullInt64  `json:"thumbnail_width"`
+	ThumbnailHeight   sql.NullInt64  `json:"thumbnail_height"`
+	Md5Hash           sql.NullString `json:"md5_hash"`
+	IsOp              sql.NullBool   `json:"is_op"`
+	HasMediaProcessed sql.NullBool   `json:"has_media_processed"`
 }
 
 func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, error) {
@@ -70,6 +76,7 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		arg.PostNo,
 		arg.Timestamp,
 		arg.Name,
+		arg.Tripcode,
 		arg.UserID,
 		arg.Country,
 		arg.CountryName,
@@ -78,6 +85,9 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		arg.Subject,
 		arg.Comment,
 		arg.CleanText,
+		arg.ContentHash,
+		arg.Source,
+		arg.ParsingStatus,
 		arg.Filename,
 		arg.FileExt,
 		arg.FileSize,
@@ -87,6 +97,7 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		arg.ThumbnailHeight,
 		arg.Md5Hash,
 		arg.IsOp,
+		arg.HasMediaProcessed,
 	)
 	var i Post
 	err := row.Scan(
@@ -96,6 +107,7 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		&i.PostNo,
 		&i.Timestamp,
 		&i.Name,
+		&i.Tripcode,
 		&i.UserID,
 		&i.Country,
 		&i.CountryName,
@@ -104,6 +116,9 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		&i.Subject,
 		&i.Comment,
 		&i.CleanText,
+		&i.ContentHash,
+		&i.Source,
+		&i.ParsingStatus,
 		&i.Filename,
 		&i.FileExt,
 		&i.FileSize,
@@ -113,13 +128,14 @@ func (q *Queries) CreatePost(ctx context.Context, arg CreatePostParams) (Post, e
 		&i.ThumbnailHeight,
 		&i.Md5Hash,
 		&i.IsOp,
+		&i.HasMediaProcessed,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getOriginalPost = `-- name: GetOriginalPost :one
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE thread_id = ? AND board = ? AND is_op = TRUE
 `
 
@@ -138,6 +154,7 @@ func (q *Queries) GetOriginalPost(ctx context.Context, arg GetOriginalPostParams
 		&i.PostNo,
 		&i.Timestamp,
 		&i.Name,
+		&i.Tripcode,
 		&i.UserID,
 		&i.Country,
 		&i.CountryName,
@@ -146,6 +163,9 @@ func (q *Queries) GetOriginalPost(ctx context.Context, arg GetOriginalPostParams
 		&i.Subject,
 		&i.Comment,
 		&i.CleanText,
+		&i.ContentHash,
+		&i.Source,
+		&i.ParsingStatus,
 		&i.Filename,
 		&i.FileExt,
 		&i.FileSize,
@@ -155,13 +175,14 @@ func (q *Queries) GetOriginalPost(ctx context.Context, arg GetOriginalPostParams
 		&i.ThumbnailHeight,
 		&i.Md5Hash,
 		&i.IsOp,
+		&i.HasMediaProcessed,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getPost = `-- name: GetPost :one
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE thread_id = ? AND board = ? AND post_no = ?
 `
 
@@ -181,6 +202,7 @@ func (q *Queries) GetPost(ctx context.Context, arg GetPostParams) (Post, error) 
 		&i.PostNo,
 		&i.Timestamp,
 		&i.Name,
+		&i.Tripcode,
 		&i.UserID,
 		&i.Country,
 		&i.CountryName,
@@ -189,6 +211,9 @@ func (q *Queries) GetPost(ctx context.Context, arg GetPostParams) (Post, error) 
 		&i.Subject,
 		&i.Comment,
 		&i.CleanText,
+		&i.ContentHash,
+		&i.Source,
+		&i.ParsingStatus,
 		&i.Filename,
 		&i.FileExt,
 		&i.FileSize,
@@ -198,13 +223,14 @@ func (q *Queries) GetPost(ctx context.Context, arg GetPostParams) (Post, error) 
 		&i.ThumbnailHeight,
 		&i.Md5Hash,
 		&i.IsOp,
+		&i.HasMediaProcessed,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getPostsByThread = `-- name: GetPostsByThread :many
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE thread_id = ? AND board = ?
 ORDER BY post_no ASC
 `
@@ -230,6 +256,7 @@ func (q *Queries) GetPostsByThread(ctx context.Context, arg GetPostsByThreadPara
 			&i.PostNo,
 			&i.Timestamp,
 			&i.Name,
+			&i.Tripcode,
 			&i.UserID,
 			&i.Country,
 			&i.CountryName,
@@ -238,6 +265,9 @@ func (q *Queries) GetPostsByThread(ctx context.Context, arg GetPostsByThreadPara
 			&i.Subject,
 			&i.Comment,
 			&i.CleanText,
+			&i.ContentHash,
+			&i.Source,
+			&i.ParsingStatus,
 			&i.Filename,
 			&i.FileExt,
 			&i.FileSize,
@@ -247,6 +277,7 @@ func (q *Queries) GetPostsByThread(ctx context.Context, arg GetPostsByThreadPara
 			&i.ThumbnailHeight,
 			&i.Md5Hash,
 			&i.IsOp,
+			&i.HasMediaProcessed,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -263,7 +294,7 @@ func (q *Queries) GetPostsByThread(ctx context.Context, arg GetPostsByThreadPara
 }
 
 const getPostsByUser = `-- name: GetPostsByUser :many
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE board = ? AND user_id = ?
 ORDER BY timestamp DESC
 `
@@ -289,6 +320,7 @@ func (q *Queries) GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) 
 			&i.PostNo,
 			&i.Timestamp,
 			&i.Name,
+			&i.Tripcode,
 			&i.UserID,
 			&i.Country,
 			&i.CountryName,
@@ -297,6 +329,9 @@ func (q *Queries) GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) 
 			&i.Subject,
 			&i.Comment,
 			&i.CleanText,
+			&i.ContentHash,
+			&i.Source,
+			&i.ParsingStatus,
 			&i.Filename,
 			&i.FileExt,
 			&i.FileSize,
@@ -306,6 +341,7 @@ func (q *Queries) GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) 
 			&i.ThumbnailHeight,
 			&i.Md5Hash,
 			&i.IsOp,
+			&i.HasMediaProcessed,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -322,7 +358,7 @@ func (q *Queries) GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) 
 }
 
 const getRecentPosts = `-- name: GetRecentPosts :many
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE board = ?
 ORDER BY timestamp DESC
 LIMIT ?
@@ -349,6 +385,7 @@ func (q *Queries) GetRecentPosts(ctx context.Context, arg GetRecentPostsParams) 
 			&i.PostNo,
 			&i.Timestamp,
 			&i.Name,
+			&i.Tripcode,
 			&i.UserID,
 			&i.Country,
 			&i.CountryName,
@@ -357,6 +394,9 @@ func (q *Queries) GetRecentPosts(ctx context.Context, arg GetRecentPostsParams) 
 			&i.Subject,
 			&i.Comment,
 			&i.CleanText,
+			&i.ContentHash,
+			&i.Source,
+			&i.ParsingStatus,
 			&i.Filename,
 			&i.FileExt,
 			&i.FileSize,
@@ -366,6 +406,7 @@ func (q *Queries) GetRecentPosts(ctx context.Context, arg GetRecentPostsParams) 
 			&i.ThumbnailHeight,
 			&i.Md5Hash,
 			&i.IsOp,
+			&i.HasMediaProcessed,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -382,7 +423,7 @@ func (q *Queries) GetRecentPosts(ctx context.Context, arg GetRecentPostsParams) 
 }
 
 const searchPosts = `-- name: SearchPosts :many
-SELECT id, thread_id, board, post_no, timestamp, name, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, created_at FROM posts 
+SELECT id, thread_id, board, post_no, timestamp, name, tripcode, user_id, country, country_name, flag, flag_name, subject, comment, clean_text, content_hash, source, parsing_status, filename, file_ext, file_size, image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, is_op, has_media_processed, created_at FROM posts 
 WHERE board = ? AND clean_text LIKE ?
 ORDER BY timestamp DESC
 LIMIT ?
@@ -410,6 +451,7 @@ func (q *Queries) SearchPosts(ctx context.Context, arg SearchPostsParams) ([]Pos
 			&i.PostNo,
 			&i.Timestamp,
 			&i.Name,
+			&i.Tripcode,
 			&i.UserID,
 			&i.Country,
 			&i.CountryName,
@@ -418,6 +460,9 @@ func (q *Queries) SearchPosts(ctx context.Context, arg SearchPostsParams) ([]Pos
 			&i.Subject,
 			&i.Comment,
 			&i.CleanText,
+			&i.ContentHash,
+			&i.Source,
+			&i.ParsingStatus,
 			&i.Filename,
 			&i.FileExt,
 			&i.FileSize,
@@ -427,6 +472,7 @@ func (q *Queries) SearchPosts(ctx context.Context, arg SearchPostsParams) ([]Pos
 			&i.ThumbnailHeight,
 			&i.Md5Hash,
 			&i.IsOp,
+			&i.HasMediaProcessed,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err

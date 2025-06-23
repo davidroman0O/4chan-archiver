@@ -12,9 +12,10 @@ import (
 
 var (
 	board          string
-	includeContent bool
-	includeMedia   bool
-	includePosts   bool
+	noContent      bool
+	noMedia        bool
+	noPosts        bool
+	noMarkdown     bool
 	maxConcurrency int
 	skipExisting   bool
 	databaseMode   string
@@ -27,15 +28,30 @@ var archiveCmd = &cobra.Command{
 	Short: "Archive one or multiple 4chan threads",
 	Long: `Archive 4chan threads with controlled downloading and metadata tracking.
 
+By default, all features are enabled: posts, media, content, and markdown export.
+Use --no-* flags to disable specific features.
+
 Examples:
-  # Archive a single thread from /pol/
+  # Archive everything (default behavior)
   4archive archive --board pol 123456789
 
-  # Archive multiple threads
+  # Archive multiple threads with all features
   4archive archive --board b 123456789 987654321 555666777
 
-  # Archive with specific content types
-  4archive archive --board pol --media --posts 123456789
+  # Archive without media files
+  4archive archive --board pol --no-media 123456789
+
+  # Archive without markdown export
+  4archive archive --board pol --no-markdown 123456789
+
+  # Archive only posts (no media, no markdown)
+  4archive archive --board pol --no-media --no-markdown 123456789
+
+  # Archive from 4plebs archive
+  4archive archive --board pol --source 4plebs 123456789
+
+  # Archive 4plebs paginated thread (chunk URL)
+  4archive archive --board pol --source 4plebs pol/chunk/507147249/500/22
 
   # Archive to specific directory
   4archive archive --board pol --output /path/to/archive 123456789`,
@@ -48,21 +64,23 @@ func init() {
 
 	// Archive-specific flags
 	archiveCmd.Flags().StringVarP(&board, "board", "b", archiver.DefaultBoard, "board name (pol, b, etc.)")
-	archiveCmd.Flags().BoolVar(&includeContent, "content", true, "include thread content/posts")
-	archiveCmd.Flags().BoolVar(&includeMedia, "media", true, "include media files (images, videos)")
-	archiveCmd.Flags().BoolVar(&includePosts, "posts", true, "include post text and metadata")
+	archiveCmd.Flags().BoolVar(&noContent, "no-content", false, "exclude thread content/posts")
+	archiveCmd.Flags().BoolVar(&noMedia, "no-media", false, "exclude media files (images, videos)")
+	archiveCmd.Flags().BoolVar(&noPosts, "no-posts", false, "exclude post text and metadata")
+	archiveCmd.Flags().BoolVar(&noMarkdown, "no-markdown", false, "exclude thread posts from markdown format for easy reading")
 	archiveCmd.Flags().IntVarP(&maxConcurrency, "concurrency", "c", 3, "maximum concurrent downloads")
 	archiveCmd.Flags().BoolVar(&skipExisting, "skip-existing", true, "skip files that already exist")
 	archiveCmd.Flags().StringVar(&databaseMode, "database-mode", archiver.DefaultDatabaseMode,
 		"database mode: '"+archiver.DatabaseModeMemory+"', '"+archiver.DatabaseModeFile+"', or '"+archiver.DatabaseModeAuto+"'")
 	archiveCmd.Flags().StringVar(&source, "source", archiver.DefaultSource,
-		"source: '"+archiver.SourceFourChan+"', '"+archiver.SourceArchivedMoe+"', or '"+archiver.SourceAuto+"'")
+		"source: '"+archiver.SourceFourChan+"', '"+archiver.SourceArchivedMoe+"', '"+archiver.Source4Plebs+"', or '"+archiver.SourceAuto+"'")
 
 	// Bind flags to viper
 	viper.BindPFlag("board", archiveCmd.Flags().Lookup("board"))
-	viper.BindPFlag("content", archiveCmd.Flags().Lookup("content"))
-	viper.BindPFlag("media", archiveCmd.Flags().Lookup("media"))
-	viper.BindPFlag("posts", archiveCmd.Flags().Lookup("posts"))
+	viper.BindPFlag("no-content", archiveCmd.Flags().Lookup("no-content"))
+	viper.BindPFlag("no-media", archiveCmd.Flags().Lookup("no-media"))
+	viper.BindPFlag("no-posts", archiveCmd.Flags().Lookup("no-posts"))
+	viper.BindPFlag("no-markdown", archiveCmd.Flags().Lookup("no-markdown"))
 	viper.BindPFlag("concurrency", archiveCmd.Flags().Lookup("concurrency"))
 	viper.BindPFlag("skip-existing", archiveCmd.Flags().Lookup("skip-existing"))
 	viper.BindPFlag("database-mode", archiveCmd.Flags().Lookup("database-mode"))
@@ -91,19 +109,20 @@ func runArchive(cmd *cobra.Command, args []string) error {
 
 	// Create archiver configuration
 	config := &archiver.Config{
-		Board:          viper.GetString("board"),
-		OutputDir:      outputPath,
-		RateLimitMs:    viper.GetInt("rate-limit"),
-		MaxRetries:     viper.GetInt("max-retries"),
-		UserAgent:      viper.GetString("user-agent"),
-		Verbose:        viper.GetBool("verbose"),
-		IncludeContent: viper.GetBool("content"),
-		IncludeMedia:   viper.GetBool("media"),
-		IncludePosts:   viper.GetBool("posts"),
-		MaxConcurrency: viper.GetInt("concurrency"),
-		SkipExisting:   viper.GetBool("skip-existing"),
-		DatabaseMode:   viper.GetString("database-mode"),
-		Source:         viper.GetString("source"),
+		Board:           viper.GetString("board"),
+		OutputDir:       outputPath,
+		RateLimitMs:     viper.GetInt("rate-limit"),
+		MaxRetries:      viper.GetInt("max-retries"),
+		UserAgent:       viper.GetString("user-agent"),
+		Verbose:         viper.GetBool("verbose"),
+		IncludeContent:  !viper.GetBool("no-content"),
+		IncludeMedia:    !viper.GetBool("no-media"),
+		IncludePosts:    !viper.GetBool("no-posts"),
+		IncludeMarkdown: !viper.GetBool("no-markdown"),
+		MaxConcurrency:  viper.GetInt("concurrency"),
+		SkipExisting:    viper.GetBool("skip-existing"),
+		DatabaseMode:    viper.GetString("database-mode"),
+		Source:          viper.GetString("source"),
 	}
 
 	// Create archiver instance

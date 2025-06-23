@@ -1,11 +1,12 @@
 -- name: CreatePost :one
 INSERT INTO posts (
-    thread_id, board, post_no, timestamp, name, user_id, 
+    thread_id, board, post_no, timestamp, name, tripcode, user_id, 
     country, country_name, flag, flag_name, subject, comment, clean_text,
-    filename, file_ext, file_size, image_width, image_height, 
-    thumbnail_width, thumbnail_height, md5_hash, is_op
+    content_hash, source, parsing_status, filename, file_ext, file_size, 
+    image_width, image_height, thumbnail_width, thumbnail_height, md5_hash, 
+    is_op, has_media_processed
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING *;
 
 -- name: GetPost :one

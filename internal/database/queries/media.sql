@@ -1,9 +1,10 @@
 -- name: CreateMedia :one
 INSERT INTO media (
     thread_id, board, post_no, filename, original_filename, file_ext, 
-    file_size, width, height, md5_hash, local_path, download_status
+    file_size, width, height, md5_hash, media_type, source_url, thumbnail_url,
+    local_path, download_status, download_attempts, last_download_attempt
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING *;
 
 -- name: GetMedia :one

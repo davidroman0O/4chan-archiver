@@ -13,24 +13,28 @@ import (
 
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (
-    board, user_id, name, country, country_name, flag, flag_name,
-    first_seen, last_seen, post_count
+    board, user_id, name, tripcode, country, country_name, flag, flag_name,
+    first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-) RETURNING id, board, user_id, name, country, country_name, flag, flag_name, first_seen, last_seen, post_count
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+) RETURNING id, board, user_id, name, tripcode, country, country_name, flag, flag_name, first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board
 `
 
 type CreateUserParams struct {
-	Board       string         `json:"board"`
-	UserID      string         `json:"user_id"`
-	Name        string         `json:"name"`
-	Country     sql.NullString `json:"country"`
-	CountryName sql.NullString `json:"country_name"`
-	Flag        sql.NullString `json:"flag"`
-	FlagName    sql.NullString `json:"flag_name"`
-	FirstSeen   time.Time      `json:"first_seen"`
-	LastSeen    time.Time      `json:"last_seen"`
-	PostCount   sql.NullInt64  `json:"post_count"`
+	Board           string          `json:"board"`
+	UserID          string          `json:"user_id"`
+	Name            string          `json:"name"`
+	Tripcode        sql.NullString  `json:"tripcode"`
+	Country         sql.NullString  `json:"country"`
+	CountryName     sql.NullString  `json:"country_name"`
+	Flag            sql.NullString  `json:"flag"`
+	FlagName        sql.NullString  `json:"flag_name"`
+	FirstSeen       time.Time       `json:"first_seen"`
+	LastSeen        time.Time       `json:"last_seen"`
+	PostCount       sql.NullInt64   `json:"post_count"`
+	TotalMediaPosts sql.NullInt64   `json:"total_media_posts"`
+	AvgPostLength   sql.NullFloat64 `json:"avg_post_length"`
+	MostCommonBoard sql.NullString  `json:"most_common_board"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
@@ -38,6 +42,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		arg.Board,
 		arg.UserID,
 		arg.Name,
+		arg.Tripcode,
 		arg.Country,
 		arg.CountryName,
 		arg.Flag,
@@ -45,6 +50,9 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		arg.FirstSeen,
 		arg.LastSeen,
 		arg.PostCount,
+		arg.TotalMediaPosts,
+		arg.AvgPostLength,
+		arg.MostCommonBoard,
 	)
 	var i User
 	err := row.Scan(
@@ -52,6 +60,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Board,
 		&i.UserID,
 		&i.Name,
+		&i.Tripcode,
 		&i.Country,
 		&i.CountryName,
 		&i.Flag,
@@ -59,12 +68,15 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.FirstSeen,
 		&i.LastSeen,
 		&i.PostCount,
+		&i.TotalMediaPosts,
+		&i.AvgPostLength,
+		&i.MostCommonBoard,
 	)
 	return i, err
 }
 
 const getActiveUsers = `-- name: GetActiveUsers :many
-SELECT u.id, u.board, u.user_id, u.name, u.country, u.country_name, u.flag, u.flag_name, u.first_seen, u.last_seen, u.post_count, p.timestamp as last_post_time
+SELECT u.id, u.board, u.user_id, u.name, u.tripcode, u.country, u.country_name, u.flag, u.flag_name, u.first_seen, u.last_seen, u.post_count, u.total_media_posts, u.avg_post_length, u.most_common_board, p.timestamp as last_post_time
 FROM users u
 JOIN posts p ON u.user_id = p.user_id AND u.board = p.board
 WHERE u.board = ? AND p.timestamp > ?
@@ -78,18 +90,22 @@ type GetActiveUsersParams struct {
 }
 
 type GetActiveUsersRow struct {
-	ID           int64          `json:"id"`
-	Board        string         `json:"board"`
-	UserID       string         `json:"user_id"`
-	Name         string         `json:"name"`
-	Country      sql.NullString `json:"country"`
-	CountryName  sql.NullString `json:"country_name"`
-	Flag         sql.NullString `json:"flag"`
-	FlagName     sql.NullString `json:"flag_name"`
-	FirstSeen    time.Time      `json:"first_seen"`
-	LastSeen     time.Time      `json:"last_seen"`
-	PostCount    sql.NullInt64  `json:"post_count"`
-	LastPostTime int64          `json:"last_post_time"`
+	ID              int64           `json:"id"`
+	Board           string          `json:"board"`
+	UserID          string          `json:"user_id"`
+	Name            string          `json:"name"`
+	Tripcode        sql.NullString  `json:"tripcode"`
+	Country         sql.NullString  `json:"country"`
+	CountryName     sql.NullString  `json:"country_name"`
+	Flag            sql.NullString  `json:"flag"`
+	FlagName        sql.NullString  `json:"flag_name"`
+	FirstSeen       time.Time       `json:"first_seen"`
+	LastSeen        time.Time       `json:"last_seen"`
+	PostCount       sql.NullInt64   `json:"post_count"`
+	TotalMediaPosts sql.NullInt64   `json:"total_media_posts"`
+	AvgPostLength   sql.NullFloat64 `json:"avg_post_length"`
+	MostCommonBoard sql.NullString  `json:"most_common_board"`
+	LastPostTime    int64           `json:"last_post_time"`
 }
 
 func (q *Queries) GetActiveUsers(ctx context.Context, arg GetActiveUsersParams) ([]GetActiveUsersRow, error) {
@@ -106,6 +122,7 @@ func (q *Queries) GetActiveUsers(ctx context.Context, arg GetActiveUsersParams) 
 			&i.Board,
 			&i.UserID,
 			&i.Name,
+			&i.Tripcode,
 			&i.Country,
 			&i.CountryName,
 			&i.Flag,
@@ -113,6 +130,9 @@ func (q *Queries) GetActiveUsers(ctx context.Context, arg GetActiveUsersParams) 
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.PostCount,
+			&i.TotalMediaPosts,
+			&i.AvgPostLength,
+			&i.MostCommonBoard,
 			&i.LastPostTime,
 		); err != nil {
 			return nil, err
@@ -129,7 +149,7 @@ func (q *Queries) GetActiveUsers(ctx context.Context, arg GetActiveUsersParams) 
 }
 
 const getTopUsers = `-- name: GetTopUsers :many
-SELECT id, board, user_id, name, country, country_name, flag, flag_name, first_seen, last_seen, post_count FROM users 
+SELECT id, board, user_id, name, tripcode, country, country_name, flag, flag_name, first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board FROM users 
 WHERE board = ?
 ORDER BY post_count DESC
 LIMIT ?
@@ -154,6 +174,7 @@ func (q *Queries) GetTopUsers(ctx context.Context, arg GetTopUsersParams) ([]Use
 			&i.Board,
 			&i.UserID,
 			&i.Name,
+			&i.Tripcode,
 			&i.Country,
 			&i.CountryName,
 			&i.Flag,
@@ -161,6 +182,9 @@ func (q *Queries) GetTopUsers(ctx context.Context, arg GetTopUsersParams) ([]Use
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.PostCount,
+			&i.TotalMediaPosts,
+			&i.AvgPostLength,
+			&i.MostCommonBoard,
 		); err != nil {
 			return nil, err
 		}
@@ -176,7 +200,7 @@ func (q *Queries) GetTopUsers(ctx context.Context, arg GetTopUsersParams) ([]Use
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, board, user_id, name, country, country_name, flag, flag_name, first_seen, last_seen, post_count FROM users 
+SELECT id, board, user_id, name, tripcode, country, country_name, flag, flag_name, first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board FROM users 
 WHERE board = ? AND user_id = ?
 `
 
@@ -193,6 +217,7 @@ func (q *Queries) GetUser(ctx context.Context, arg GetUserParams) (User, error) 
 		&i.Board,
 		&i.UserID,
 		&i.Name,
+		&i.Tripcode,
 		&i.Country,
 		&i.CountryName,
 		&i.Flag,
@@ -200,12 +225,15 @@ func (q *Queries) GetUser(ctx context.Context, arg GetUserParams) (User, error) 
 		&i.FirstSeen,
 		&i.LastSeen,
 		&i.PostCount,
+		&i.TotalMediaPosts,
+		&i.AvgPostLength,
+		&i.MostCommonBoard,
 	)
 	return i, err
 }
 
 const getUsersByCountry = `-- name: GetUsersByCountry :many
-SELECT id, board, user_id, name, country, country_name, flag, flag_name, first_seen, last_seen, post_count FROM users 
+SELECT id, board, user_id, name, tripcode, country, country_name, flag, flag_name, first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board FROM users 
 WHERE board = ? AND country = ?
 ORDER BY post_count DESC
 `
@@ -229,6 +257,7 @@ func (q *Queries) GetUsersByCountry(ctx context.Context, arg GetUsersByCountryPa
 			&i.Board,
 			&i.UserID,
 			&i.Name,
+			&i.Tripcode,
 			&i.Country,
 			&i.CountryName,
 			&i.Flag,
@@ -236,6 +265,9 @@ func (q *Queries) GetUsersByCountry(ctx context.Context, arg GetUsersByCountryPa
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.PostCount,
+			&i.TotalMediaPosts,
+			&i.AvgPostLength,
+			&i.MostCommonBoard,
 		); err != nil {
 			return nil, err
 		}
@@ -275,26 +307,33 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) error {
 
 const upsertUser = `-- name: UpsertUser :exec
 INSERT INTO users (
-    board, user_id, name, country, country_name, flag, flag_name,
-    first_seen, last_seen, post_count
+    board, user_id, name, tripcode, country, country_name, flag, flag_name,
+    first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?
 )
 ON CONFLICT(board, user_id) DO UPDATE SET
     last_seen = excluded.last_seen,
-    post_count = post_count + 1
+    post_count = post_count + 1,
+    total_media_posts = excluded.total_media_posts,
+    avg_post_length = excluded.avg_post_length,
+    most_common_board = excluded.most_common_board
 `
 
 type UpsertUserParams struct {
-	Board       string         `json:"board"`
-	UserID      string         `json:"user_id"`
-	Name        string         `json:"name"`
-	Country     sql.NullString `json:"country"`
-	CountryName sql.NullString `json:"country_name"`
-	Flag        sql.NullString `json:"flag"`
-	FlagName    sql.NullString `json:"flag_name"`
-	FirstSeen   time.Time      `json:"first_seen"`
-	LastSeen    time.Time      `json:"last_seen"`
+	Board           string          `json:"board"`
+	UserID          string          `json:"user_id"`
+	Name            string          `json:"name"`
+	Tripcode        sql.NullString  `json:"tripcode"`
+	Country         sql.NullString  `json:"country"`
+	CountryName     sql.NullString  `json:"country_name"`
+	Flag            sql.NullString  `json:"flag"`
+	FlagName        sql.NullString  `json:"flag_name"`
+	FirstSeen       time.Time       `json:"first_seen"`
+	LastSeen        time.Time       `json:"last_seen"`
+	TotalMediaPosts sql.NullInt64   `json:"total_media_posts"`
+	AvgPostLength   sql.NullFloat64 `json:"avg_post_length"`
+	MostCommonBoard sql.NullString  `json:"most_common_board"`
 }
 
 func (q *Queries) UpsertUser(ctx context.Context, arg UpsertUserParams) error {
@@ -302,12 +341,16 @@ func (q *Queries) UpsertUser(ctx context.Context, arg UpsertUserParams) error {
 		arg.Board,
 		arg.UserID,
 		arg.Name,
+		arg.Tripcode,
 		arg.Country,
 		arg.CountryName,
 		arg.Flag,
 		arg.FlagName,
 		arg.FirstSeen,
 		arg.LastSeen,
+		arg.TotalMediaPosts,
+		arg.AvgPostLength,
+		arg.MostCommonBoard,
 	)
 	return err
 }

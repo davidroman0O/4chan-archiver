@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +32,7 @@ import (
 const (
 	SourceFourChan    = "4chan"
 	SourceArchivedMoe = "archived.moe"
+	Source4Plebs      = "4plebs"
 	SourceAuto        = "auto"
 )
 
@@ -37,6 +41,7 @@ const (
 	FourChanAPIBaseURL   = "https://a.4cdn.org"
 	FourChanMediaBaseURL = "https://i.4cdn.org"
 	ArchivedMoeBaseURL   = "https://archived.moe"
+	FourPlebsBaseURL     = "https://archive.4plebs.org"
 )
 
 // Database modes
@@ -54,11 +59,12 @@ const (
 
 // File names
 const (
-	ThreadJSONFileName = "thread.json"
-	PostsJSONFileName  = "posts.json"
-	ThreadDBFileName   = "thread.db"
-	MetadataFileName   = ".metadata.json"
-	MediaDirName       = "media"
+	ThreadJSONFileName     = "thread.json"
+	PostsJSONFileName      = "posts.json"
+	ThreadDBFileName       = "thread.db"
+	MetadataFileName       = ".metadata.json"
+	ThreadMarkdownFileName = "thread.md"
+	MediaDirName           = "media"
 )
 
 // Default configuration values
@@ -70,23 +76,24 @@ const (
 
 // Config holds configuration for the archiver
 type Config struct {
-	Board          string
-	OutputDir      string
-	RateLimitMs    int
-	MaxRetries     int
-	UserAgent      string
-	Verbose        bool
-	IncludeContent bool
-	IncludeMedia   bool
-	IncludePosts   bool
-	MaxConcurrency int
-	SkipExisting   bool
+	Board           string
+	OutputDir       string
+	RateLimitMs     int
+	MaxRetries      int
+	UserAgent       string
+	Verbose         bool
+	IncludeContent  bool
+	IncludeMedia    bool
+	IncludePosts    bool
+	IncludeMarkdown bool
+	MaxConcurrency  int
+	SkipExisting    bool
 
 	// Database configuration
 	DatabaseMode string // DatabaseModeMemory, DatabaseModeFile, or DatabaseModeAuto (auto detects test mode)
 
 	// Source configuration
-	Source string // SourceFourChan, SourceArchivedMoe, or SourceAuto
+	Source string // SourceFourChan, SourceArchivedMoe, Source4Plebs, or SourceAuto
 }
 
 // ArchiveResult represents the result of archiving a single thread
@@ -156,6 +163,12 @@ type Post struct {
 
 	// Additional fields for archived.moe support
 	ArchivedMoeURL string `json:"archived_moe_url,omitempty"`
+
+	// Country and flag information
+	Country     string `json:"country,omitempty"`
+	CountryName string `json:"country_name,omitempty"`
+	Flag        string `json:"flag,omitempty"`
+	FlagName    string `json:"flag_name,omitempty"`
 }
 
 // New creates a new archiver instance
@@ -167,9 +180,16 @@ func New(config *Config) (*Archiver, error) {
 		return nil, fmt.Errorf("output directory is required")
 	}
 
-	// Create HTTP client with timeout and redirect handling (like the working code)
+	// Create cookie jar for session management
+	jar, err := cookiejar.New(&cookiejar.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
+	}
+
+	// Create HTTP client with timeout, redirect handling, and cookie jar
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		Jar:     jar, // Enable cookie management
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Allow up to 10 redirects (archived.moe uses redirects for media)
 			if len(via) >= 10 {
@@ -322,6 +342,25 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 		}
 	}
 
+	// Create markdown export if requested using enhanced database approach
+	if a.config.IncludeMarkdown {
+		markdownPath := filepath.Join(threadDir, ThreadMarkdownFileName)
+
+		// Use the enhanced database-driven markdown generation
+		err := a.createEnhancedMarkdownExport(threadID, threadDir, markdownPath)
+		if err != nil {
+			if a.config.Verbose {
+				fmt.Printf("Failed to create enhanced markdown export for thread %s: %v\n", threadID, err)
+			}
+			// Fallback to basic markdown if enhanced fails
+			if err := a.createMarkdownExport(thread, markdownPath, threadID); err != nil {
+				if a.config.Verbose {
+					fmt.Printf("Failed to create fallback markdown export for thread %s: %v\n", threadID, err)
+				}
+			}
+		}
+	}
+
 	meta.SetStatus("completed")
 
 	// Save final metadata
@@ -335,38 +374,113 @@ func (a *Archiver) archiveThread(threadID string) ArchiveResult {
 	return result
 }
 
-// fetchThread retrieves thread data from either 4chan API or archived.moe
+// fetchThread retrieves thread data using source-specific parsers with proper fallback
 func (a *Archiver) fetchThread(threadID string) (*Thread, error) {
+	if a.config.Verbose {
+		fmt.Printf("Fetching thread %s with source strategy: %s\n", threadID, a.config.Source)
+	}
+
 	switch a.config.Source {
 	case SourceFourChan:
-		return a.fetchFromFourChan(threadID)
-	case SourceArchivedMoe:
-		return a.fetchFromArchivedMoe(threadID)
-	case SourceAuto:
-		// Try 4chan first, then archived.moe if it fails
-		thread, err := a.fetchFromFourChan(threadID)
-		if err != nil {
-			// Check for various errors that suggest the thread might be available on archived.moe
-			errorStr := strings.ToLower(err.Error())
-			shouldTryArchived := strings.Contains(errorStr, "thread not found (404)") ||
-				strings.Contains(errorStr, "http 403") ||
-				strings.Contains(errorStr, "http 404") ||
-				strings.Contains(errorStr, "forbidden") ||
-				strings.Contains(errorStr, "not found") ||
-				strings.Contains(errorStr, "thread does not exist") ||
-				strings.Contains(errorStr, "thread has no posts") ||
-				strings.Contains(errorStr, "received html error page")
-
-			if shouldTryArchived {
-				if a.config.Verbose {
-					fmt.Printf("Thread %s not found on 4chan, trying archived.moe...\n", threadID)
-				}
-				return a.fetchFromArchivedMoe(threadID)
-			}
+		if a.config.Verbose {
+			fmt.Printf("Using dedicated 4chan fetcher and parser\n")
 		}
-		return thread, err
+		return a.fetchFromFourChan(threadID)
+
+	case SourceArchivedMoe:
+		if a.config.Verbose {
+			fmt.Printf("Using dedicated archived.moe fetcher and parser\n")
+		}
+		return a.fetchFromArchivedMoe(threadID)
+
+	case Source4Plebs:
+		if a.config.Verbose {
+			fmt.Printf("Using dedicated 4plebs fetcher and parser\n")
+		}
+		return a.fetchFrom4Plebs(threadID)
+
+	case SourceAuto:
+		// Smart fallback with proper source tracking
+		if a.config.Verbose {
+			fmt.Printf("Auto-detection mode: trying sources in order: 4chan -> archived.moe -> 4plebs\n")
+		}
+
+		// Try 4chan first (fastest and most reliable)
+		if a.config.Verbose {
+			fmt.Printf("🔍 [Auto 1/3] Trying 4chan API...\n")
+		}
+		thread, err := a.fetchFromFourChan(threadID)
+		if err == nil {
+			if a.config.Verbose {
+				fmt.Printf("✅ [Auto] Success with 4chan API (%d posts)\n", len(thread.Posts))
+			}
+			// Update config to remember successful source for this session
+			a.config.Source = SourceFourChan
+			return thread, nil
+		}
+
+		// Check if it's a permanent 4chan error (thread doesn't exist there)
+		errorStr := strings.ToLower(err.Error())
+		shouldTryArchives := strings.Contains(errorStr, "thread not found (404)") ||
+			strings.Contains(errorStr, "http 403") ||
+			strings.Contains(errorStr, "http 404") ||
+			strings.Contains(errorStr, "forbidden") ||
+			strings.Contains(errorStr, "not found") ||
+			strings.Contains(errorStr, "thread does not exist") ||
+			strings.Contains(errorStr, "thread has no posts") ||
+			strings.Contains(errorStr, "received html error page")
+
+		if shouldTryArchives {
+			if a.config.Verbose {
+				fmt.Printf("❌ [Auto] 4chan failed (%v), trying archived.moe...\n", err)
+			}
+
+			// Try archived.moe second
+			if a.config.Verbose {
+				fmt.Printf("🔍 [Auto 2/3] Trying archived.moe...\n")
+			}
+			thread, err = a.fetchFromArchivedMoe(threadID)
+			if err == nil {
+				if a.config.Verbose {
+					fmt.Printf("✅ [Auto] Success with archived.moe (%d posts)\n", len(thread.Posts))
+				}
+				// Update config to remember successful source
+				a.config.Source = SourceArchivedMoe
+				return thread, nil
+			}
+
+			if a.config.Verbose {
+				fmt.Printf("❌ [Auto] archived.moe failed (%v), trying 4plebs...\n", err)
+			}
+
+			// Try 4plebs last
+			if a.config.Verbose {
+				fmt.Printf("🔍 [Auto 3/3] Trying 4plebs...\n")
+			}
+			thread, err = a.fetchFrom4Plebs(threadID)
+			if err == nil {
+				if a.config.Verbose {
+					fmt.Printf("✅ [Auto] Success with 4plebs (%d posts)\n", len(thread.Posts))
+				}
+				// Update config to remember successful source
+				a.config.Source = Source4Plebs
+				return thread, nil
+			}
+
+			if a.config.Verbose {
+				fmt.Printf("❌ [Auto] All sources failed. Last error from 4plebs: %v\n", err)
+			}
+			return nil, fmt.Errorf("thread %s not found on any source (4chan, archived.moe, 4plebs)", threadID)
+		} else {
+			// For non-permanent 4chan errors, just return the 4chan error
+			return nil, fmt.Errorf("4chan error: %w", err)
+		}
+
 	default:
-		// Default to 4chan
+		// Default to 4chan if unknown source
+		if a.config.Verbose {
+			fmt.Printf("Unknown source '%s', defaulting to 4chan\n", a.config.Source)
+		}
 		return a.fetchFromFourChan(threadID)
 	}
 }
@@ -556,83 +670,82 @@ func (a *Archiver) fetchFromArchivedMoe(threadID string) (*Thread, error) {
 
 // parseArchivedMoeHTML converts archived.moe HTML to Thread structure
 func (a *Archiver) parseArchivedMoeHTML(doc *goquery.Document, threadID string) (*Thread, error) {
+	if a.config.Verbose {
+		fmt.Printf("Parsing archived.moe HTML for thread %s\n", threadID)
+	}
+
+	// archived.moe uses a similar structure to 4plebs, so we can leverage the unified parser
+	// But first, let's try to detect the actual HTML structure
+
+	// Check if this looks like 4plebs/archived.moe format (article.post elements)
+	if doc.Find("article.post, article.thread").Length() > 0 {
+		if a.config.Verbose {
+			fmt.Printf("Detected 4plebs-like format in archived.moe, using 4plebs parser\n")
+		}
+		return a.Parse4PlebsHTML(doc, fmt.Sprintf("archived.moe://%s/thread/%s", a.config.Board, threadID))
+	}
+
+	// Check if this looks like 4chan format (div.postContainer elements)
+	if doc.Find("div.postContainer").Length() > 0 {
+		if a.config.Verbose {
+			fmt.Printf("Detected 4chan-like format in archived.moe, using 4chan parser\n")
+		}
+		return a.Parse4ChanHTML(doc, fmt.Sprintf("archived.moe://%s/thread/%s", a.config.Board, threadID))
+	}
+
+	// If we can't detect the format, try to parse any post-like elements
 	thread := &Thread{Posts: []Post{}}
-	postNum := int64(1)
-	threadIDInt, _ := strconv.ParseInt(threadID, 10, 64)
 
-	// Find all <a> elements that wrap an <img> element (like in the working code)
-	doc.Find("a").Each(func(i int, s *goquery.Selection) {
-		if s.Find("img").Length() == 0 {
-			return
+	// Look for common post patterns
+	postSelectors := []string{
+		"article.post",
+		"article.thread",
+		"div.postContainer",
+		"div.post",
+		".post",
+		"[id^='p']", // Elements with IDs starting with 'p' (4chan style)
+	}
+
+	postsFound := false
+	for _, selector := range postSelectors {
+		elements := doc.Find(selector)
+		if elements.Length() > 0 {
+			if a.config.Verbose {
+				fmt.Printf("Found %d elements with selector '%s'\n", elements.Length(), selector)
+			}
+
+			elements.Each(func(i int, s *goquery.Selection) {
+				var post *Post
+
+				// Try different parsing methods based on the element structure
+				if strings.Contains(selector, "article") {
+					post = a.parse4PlebsPost(s, i == 0)
+				} else {
+					post = a.parse4ChanPost(s, i == 0)
+				}
+
+				if post != nil {
+					thread.Posts = append(thread.Posts, *post)
+					postsFound = true
+				}
+			})
+
+			if postsFound {
+				break // Use the first selector that found posts
+			}
 		}
+	}
 
-		href, exists := s.Attr("href")
-		if !exists || href == "" {
-			return
-		}
+	if !postsFound {
+		return nil, fmt.Errorf("no posts found in archived.moe page - unknown HTML structure")
+	}
 
-		// Process links to various file types found in 4chan/archived threads
-		lower := strings.ToLower(href)
-		isMediaFile := strings.Contains(lower, ".jpg") ||
-			strings.Contains(lower, ".jpeg") ||
-			strings.Contains(lower, ".png") ||
-			strings.Contains(lower, ".gif") ||
-			strings.Contains(lower, ".webp") ||
-			strings.Contains(lower, ".webm") ||
-			strings.Contains(lower, ".mp4") ||
-			strings.Contains(lower, ".pdf") ||
-			strings.Contains(lower, ".txt") ||
-			strings.Contains(lower, ".zip") ||
-			strings.Contains(lower, ".rar") ||
-			strings.Contains(lower, ".7z") ||
-			strings.Contains(lower, ".mp3") ||
-			strings.Contains(lower, ".wav") ||
-			strings.Contains(lower, ".ogg") ||
-			strings.Contains(lower, ".flac") ||
-			strings.Contains(lower, ".swf") ||
-			strings.Contains(lower, ".bmp") ||
-			strings.Contains(lower, ".tiff") ||
-			strings.Contains(lower, ".avif")
-
-		if !isMediaFile {
-			return
-		}
-
-		// Normalize the URL (exactly like the working code)
-		if strings.HasPrefix(href, "//") {
-			href = "https:" + href
-		} else if strings.HasPrefix(href, "/") {
-			href = "https://archived.moe" + href
-		}
-
-		// Extract filename from the URL
-		parts := strings.Split(href, "/")
-		filename := parts[len(parts)-1]
-		ext := filepath.Ext(filename)
-		filenameNoExt := strings.TrimSuffix(filename, ext)
-
-		// Create a minimal post structure for this media
-		post := Post{
-			No:             postNum,
-			Time:           time.Now().Unix(),
-			Name:           "Anonymous",
-			Tim:            postNum, // Use post number as tim
-			Filename:       filenameNoExt,
-			Ext:            ext,
-			ArchivedMoeURL: href, // Store the actual archived.moe URL
-		}
-
-		thread.Posts = append(thread.Posts, post)
-		postNum++
-	})
-
-	// If no media posts found, create at least one dummy post for the thread
 	if len(thread.Posts) == 0 {
-		thread.Posts = append(thread.Posts, Post{
-			No:   threadIDInt,
-			Time: time.Now().Unix(),
-			Name: "Anonymous",
-		})
+		return nil, fmt.Errorf("no valid posts extracted from archived.moe page")
+	}
+
+	if a.config.Verbose {
+		fmt.Printf("Successfully parsed %d posts from archived.moe\n", len(thread.Posts))
 	}
 
 	return thread, nil
@@ -823,49 +936,97 @@ func (a *Archiver) downloadFile(url, localPath string) (int64, error) {
 
 // setRealisticHeaders sets realistic browser headers, escalating after failures
 func (a *Archiver) setRealisticHeaders(req *http.Request, attemptCount int) {
-	// Always set a user agent
-	userAgent := a.config.UserAgent
-	if userAgent == "" {
-		userAgent = uarand.GetRandom()
-	}
-	req.Header.Set("User-Agent", userAgent)
+	// Always get a fresh random user agent for each request
+	freshUA := uarand.GetRandom()
 
-	// After 2+ failures, add more realistic browser headers
-	if attemptCount >= 2 {
-		// Accept any content type - 4chan/archived threads can have PDFs, videos, archives, etc.
-		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-		req.Header.Set("Cache-Control", "max-age=0")
-
-		// Use appropriate Sec-Fetch headers for media downloads
-		req.Header.Set("Sec-Fetch-Dest", "image") // Most downloads are images
-		req.Header.Set("Sec-Fetch-Mode", "no-cors")
-		req.Header.Set("Sec-Fetch-Site", "cross-site")
-		req.Header.Set("Upgrade-Insecure-Requests", "1")
+	// Base headers that work well for most sites
+	headers := map[string]string{
+		"User-Agent":                freshUA,
+		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language":           "en-US,en;q=0.5",
+		"Accept-Encoding":           "gzip, deflate, br",
+		"Connection":                "keep-alive",
+		"Upgrade-Insecure-Requests": "1",
+		"Cache-Control":             "max-age=0",
+		"DNT":                       "1",
 	}
 
-	// After 3+ failures, add referrer and connection headers
-	if attemptCount >= 3 {
-		if strings.Contains(req.URL.Host, "thebarchive.com") {
-			req.Header.Set("Referer", "https://archived.moe/")
-		} else if strings.Contains(req.URL.Host, "archived.moe") {
-			req.Header.Set("Referer", "https://archived.moe/")
+	// Add some randomization to make each request unique
+	if rand.Intn(2) == 0 {
+		headers["Accept-Language"] = "en-US,en;q=0.9"
+	}
+	if rand.Intn(3) == 0 {
+		headers["Cache-Control"] = "no-cache"
+	}
+
+	// Vary headers based on attempt to evade detection
+	switch attemptCount % 4 {
+	case 0:
+		// Chrome-like headers
+		headers["Sec-Fetch-Dest"] = "document"
+		headers["Sec-Fetch-Mode"] = "navigate"
+		headers["Sec-Fetch-Site"] = "none"
+		headers["Sec-Fetch-User"] = "?1"
+		headers["Sec-Ch-Ua"] = `"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"`
+		headers["Sec-Ch-Ua-Mobile"] = "?0"
+		headers["Sec-Ch-Ua-Platform"] = `"macOS"`
+
+	case 1:
+		// Firefox-like headers
+		headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+		headers["Accept-Language"] = "en-US,en;q=0.9"
+		headers["Sec-Fetch-Dest"] = "document"
+		headers["Sec-Fetch-Mode"] = "navigate"
+		headers["Sec-Fetch-Site"] = "cross-site"
+
+	case 2:
+		// Safari-like headers
+		headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
+		headers["Accept-Language"] = "en-US,en;q=0.9"
+		headers["Sec-Ch-Ua"] = `"Safari";v="17", "Not;A=Brand";v="8"`
+		headers["Sec-Ch-Ua-Mobile"] = "?0"
+		headers["Sec-Ch-Ua-Platform"] = `"macOS"`
+
+	case 3:
+		// Edge-like headers with some variation
+		headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+		headers["Accept-Language"] = "en-US,en;q=0.9"
+		headers["Sec-Ch-Ua"] = `"Microsoft Edge";v="119", "Chromium";v="119", "Not?A_Brand";v="24"`
+		headers["Sec-Ch-Ua-Mobile"] = "?0"
+		headers["Sec-Ch-Ua-Platform"] = `"Windows"`
+		headers["Sec-Fetch-Dest"] = "document"
+		headers["Sec-Fetch-Mode"] = "navigate"
+		headers["Sec-Fetch-Site"] = "none"
+		headers["Sec-Fetch-User"] = "?1"
+	}
+
+	// For 4plebs specifically, add referrer after first attempt
+	if strings.Contains(req.URL.Host, "4plebs") && attemptCount > 1 {
+		headers["Referer"] = "https://archive.4plebs.org/"
+		// Vary some 4plebs-specific headers with randomization
+		if attemptCount%2 == 0 {
+			headers["Accept-Language"] = "en-US,en;q=0.8,*;q=0.6"
+			headers["Cache-Control"] = "no-cache"
+			headers["Pragma"] = "no-cache"
 		}
-		req.Header.Set("Connection", "keep-alive")
-		req.Header.Set("DNT", "1")
+		// Occasionally add some additional headers to look more like a real session
+		if rand.Intn(3) == 0 {
+			headers["X-Forwarded-For"] = fmt.Sprintf("192.168.%d.%d", rand.Intn(255), rand.Intn(255))
+		}
 	}
 
-	// After 4+ failures, randomize user agent again and add viewport hint
-	if attemptCount >= 4 {
-		req.Header.Set("User-Agent", uarand.GetRandom()) // Force new random UA
-		req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
-		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-		req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+	// For archived.moe
+	if strings.Contains(req.URL.Host, "archived.moe") && attemptCount > 1 {
+		headers["Referer"] = "https://archived.moe/"
+	}
+
+	// Apply all headers to the request
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 
 	if a.config.Verbose && attemptCount > 1 {
-		fmt.Printf("Attempt %d for %s: using enhanced headers\n", attemptCount, req.URL.String())
+		fmt.Printf("Attempt %d for %s: using rotated headers (type %d) with fresh UA\n", attemptCount, req.URL.String(), attemptCount%4)
 	}
 }
 
@@ -1237,22 +1398,52 @@ func cleanHTMLText(html string) string {
 	// Use the proper conversation analysis parser to preserve >> formatting
 	analyzer := analysis.NewPostAnalyzer()
 	parsed, err := analyzer.ParsePost(0, html) // PostNo doesn't matter for text cleaning
-	if err != nil {
-		// Fallback to basic cleaning if parser fails
+	if err != nil || parsed.CleanText == "" {
+		// Fallback to basic cleaning if parser fails or returns empty
 		text := html
+
+		// Basic HTML tag removal and entity decoding
 		replacements := []string{
 			"<br>", "\n",
 			"<br/>", "\n",
 			"<br />", "\n",
+			"</p>", "\n",
+			"<p>", "",
+			"</div>", "\n",
+			"<div>", "",
 			"&gt;", ">",
 			"&lt;", "<",
 			"&amp;", "&",
 			"&quot;", "\"",
+			"&nbsp;", " ",
+			"&#39;", "'",
 		}
 		for i := 0; i < len(replacements); i += 2 {
 			text = strings.Replace(text, replacements[i], replacements[i+1], -1)
 		}
-		return text
+
+		// Remove any remaining HTML tags using a simple regex-like approach
+		var result strings.Builder
+		inTag := false
+		for _, char := range text {
+			if char == '<' {
+				inTag = true
+				continue
+			}
+			if char == '>' {
+				inTag = false
+				continue
+			}
+			if !inTag {
+				result.WriteRune(char)
+			}
+		}
+
+		// Clean up excessive whitespace
+		cleaned := strings.TrimSpace(result.String())
+		cleaned = strings.ReplaceAll(cleaned, "\n\n\n", "\n\n")
+
+		return cleaned
 	}
 
 	return parsed.CleanText
@@ -1783,5 +1974,1641 @@ func (a *Archiver) performSingleThreadCheck(threadID string, config *MonitorConf
 	}
 
 	fmt.Printf("✅ [%s] Archived %d new posts with %d media files\n", threadID, len(newPosts), newMedia)
+	return nil
+}
+
+// fetchFrom4Plebs retrieves thread data from 4plebs by scraping HTML
+func (a *Archiver) fetchFrom4Plebs(threadID string) (*Thread, error) {
+	thread := &Thread{Posts: []Post{}}
+
+	// First establish a session to look like a real user
+	err := a.establish4PlebsSession()
+	if err != nil {
+		if a.config.Verbose {
+			fmt.Printf("Session establishment failed, continuing anyway: %v\n", err)
+		}
+		// Continue even if session establishment fails
+	}
+
+	// Check if this is a chunk URL with pagination info
+	if strings.Contains(threadID, "/chunk/") {
+		return a.fetchFrom4PlebsChunked(threadID)
+	}
+
+	// Regular thread URL with human-like delay before main request
+	time.Sleep(time.Duration(500+rand.Intn(1000)) * time.Millisecond)
+
+	url := fmt.Sprintf("%s/%s/thread/%s", FourPlebsBaseURL, a.config.Board, threadID)
+	return a.fetch4PlebsPage(url, thread)
+}
+
+// fetchFrom4PlebsChunked handles paginated 4plebs threads
+func (a *Archiver) fetchFrom4PlebsChunked(chunkURL string) (*Thread, error) {
+	thread := &Thread{Posts: []Post{}}
+
+	// Parse chunk URL: /pol/chunk/507147249/500/22/
+	// Extract thread ID, posts per page, and current page
+	parts := strings.Split(strings.Trim(chunkURL, "/"), "/")
+	if len(parts) < 5 {
+		return nil, fmt.Errorf("invalid chunk URL format: %s", chunkURL)
+	}
+
+	actualThreadID := parts[2]
+	postsPerPage, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return nil, fmt.Errorf("invalid posts per page in chunk URL: %s", parts[3])
+	}
+
+	startPage, err := strconv.Atoi(parts[4])
+	if err != nil {
+		return nil, fmt.Errorf("invalid page number in chunk URL: %s", parts[4])
+	}
+
+	// Try to get the first page to see total posts
+	firstPageURL := fmt.Sprintf("%s/%s/chunk/%s/%d/1/", FourPlebsBaseURL, a.config.Board, actualThreadID, postsPerPage)
+	_, err = a.fetch4PlebsPage(firstPageURL, &Thread{Posts: []Post{}})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch first page: %w", err)
+	}
+
+	// Estimate total pages based on post count info from the page
+	// For now, try to fetch pages starting from startPage until we get an error
+	currentPage := startPage
+
+	for {
+		pageURL := fmt.Sprintf("%s/%s/chunk/%s/%d/%d/", FourPlebsBaseURL, a.config.Board, actualThreadID, postsPerPage, currentPage)
+
+		if a.config.Verbose {
+			fmt.Printf("Fetching 4plebs page %d: %s\n", currentPage, pageURL)
+		}
+
+		pageThread, err := a.fetch4PlebsPage(pageURL, &Thread{Posts: []Post{}})
+		if err != nil {
+			if currentPage == startPage {
+				// If we can't even get the start page, return error
+				return nil, fmt.Errorf("failed to fetch starting page %d: %w", startPage, err)
+			}
+			// If we can't get this page, we've reached the end
+			break
+		}
+
+		// Add posts from this page
+		thread.Posts = append(thread.Posts, pageThread.Posts...)
+
+		// If this page has fewer posts than expected, we've reached the end
+		if len(pageThread.Posts) < postsPerPage {
+			break
+		}
+
+		currentPage++
+	}
+
+	if len(thread.Posts) == 0 {
+		return nil, fmt.Errorf("no posts found in thread %s", actualThreadID)
+	}
+
+	return thread, nil
+}
+
+// fetch4PlebsPage fetches a single 4plebs page and parses the HTML
+func (a *Archiver) fetch4PlebsPage(url string, thread *Thread) (*Thread, error) {
+	// Wait for rate limiter
+	a.limiter.Wait(context.Background())
+
+	for attempt := 0; attempt < a.config.MaxRetries; attempt++ {
+		// Add human-like delay between attempts (not just after failures)
+		if attempt > 0 {
+			// Exponential backoff with randomization for failed attempts
+			baseDelay := time.Duration(3+attempt*3) * time.Second
+			randomDelay := time.Duration(rand.Intn(2000)) * time.Millisecond
+			totalDelay := baseDelay + randomDelay
+
+			if a.config.Verbose {
+				fmt.Printf("Waiting %v before attempt %d (base: %v + random: %v)\n",
+					totalDelay, attempt+1, baseDelay, randomDelay)
+			}
+			time.Sleep(totalDelay)
+		} else {
+			// Small random delay even on first attempt to look more human
+			initialDelay := time.Duration(200+rand.Intn(800)) * time.Millisecond
+			time.Sleep(initialDelay)
+		}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// Set realistic headers with rotation - get a new random UA each time
+		a.setRealisticHeaders(req, attempt+1)
+
+		if a.config.Verbose {
+			fmt.Printf("Attempting 4plebs fetch (attempt %d/%d): %s\n", attempt+1, a.config.MaxRetries, url)
+		}
+
+		resp, err := a.client.Do(req)
+		if err != nil {
+			if attempt == a.config.MaxRetries-1 {
+				return nil, err
+			}
+			if a.config.Verbose {
+				fmt.Printf("Request error (attempt %d): %v\n", attempt+1, err)
+			}
+			continue // The delay is handled at the top of the loop
+		}
+
+		switch resp.StatusCode {
+		case http.StatusOK:
+			// Success case
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				if attempt == a.config.MaxRetries-1 {
+					return nil, err
+				}
+				continue
+			}
+
+			// Parse HTML
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
+			if err != nil {
+				if attempt == a.config.MaxRetries-1 {
+					return nil, fmt.Errorf("failed to parse HTML: %w", err)
+				}
+				continue
+			}
+
+			return a.Parse4PlebsHTML(doc, url)
+
+		case http.StatusForbidden:
+			resp.Body.Close()
+			if a.config.Verbose {
+				fmt.Printf("403 Forbidden (attempt %d/%d) - will retry with different headers\n",
+					attempt+1, a.config.MaxRetries)
+			}
+
+			if attempt == a.config.MaxRetries-1 {
+				return nil, fmt.Errorf("4plebs returned HTTP 403 after %d attempts - blocked by anti-bot protection", a.config.MaxRetries)
+			}
+			continue // The delay is handled at the top of the loop
+
+		case http.StatusTooManyRequests:
+			resp.Body.Close()
+			retryAfter := resp.Header.Get("Retry-After")
+			if retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil {
+					delay := time.Duration(seconds) * time.Second
+					if a.config.Verbose {
+						fmt.Printf("429 Rate Limited, waiting %v as requested\n", delay)
+					}
+					time.Sleep(delay)
+					continue
+				}
+			}
+			if a.config.Verbose {
+				fmt.Printf("429 Rate Limited (attempt %d)\n", attempt+1)
+			}
+			continue // The delay is handled at the top of the loop
+
+		case http.StatusNotFound:
+			resp.Body.Close()
+			return nil, fmt.Errorf("4plebs page not found (404): %s", url)
+
+		default:
+			resp.Body.Close()
+			if attempt == a.config.MaxRetries-1 {
+				return nil, fmt.Errorf("4plebs returned HTTP %d for %s", resp.StatusCode, url)
+			}
+			if a.config.Verbose {
+				fmt.Printf("HTTP %d (attempt %d)\n", resp.StatusCode, attempt+1)
+			}
+			continue
+		}
+	}
+
+	return thread, nil
+}
+
+// createMarkdownExport creates a markdown file with all thread posts
+func (a *Archiver) createMarkdownExport(thread *Thread, markdownPath, threadID string) error {
+	var builder strings.Builder
+
+	// Write header
+	builder.WriteString(fmt.Sprintf("# Thread %s\n\n", threadID))
+	builder.WriteString(fmt.Sprintf("**Board:** /%s/\n", a.config.Board))
+	builder.WriteString(fmt.Sprintf("**Archived:** %s\n", time.Now().UTC().Format("2006-01-02 15:04:05 UTC")))
+	builder.WriteString(fmt.Sprintf("**Posts:** %d\n\n", len(thread.Posts)))
+
+	builder.WriteString("---\n\n")
+
+	// Process each post
+	for i, post := range thread.Posts {
+		isOP := i == 0
+
+		// Post header
+		if isOP {
+			builder.WriteString("## Original Post\n\n")
+		} else {
+			builder.WriteString(fmt.Sprintf("## Post #%d\n\n", post.No))
+		}
+
+		// Post metadata
+		builder.WriteString("**Post Info:**\n")
+		builder.WriteString(fmt.Sprintf("- **Post Number:** %d\n", post.No))
+
+		// Format timestamp
+		if post.Time > 0 {
+			timestamp := time.Unix(post.Time, 0).UTC()
+			builder.WriteString(fmt.Sprintf("- **Date:** %s\n", timestamp.Format("2006-01-02 15:04:05 UTC")))
+		}
+
+		// Author information
+		author := "Anonymous"
+		if post.Name != "" && post.Name != "Anonymous" {
+			author = post.Name
+		}
+		builder.WriteString(fmt.Sprintf("- **Author:** %s", author))
+
+		if post.Trip != "" {
+			builder.WriteString(fmt.Sprintf(" **%s**", post.Trip))
+		}
+
+		if post.ID != "" {
+			builder.WriteString(fmt.Sprintf(" (ID: %s)", post.ID))
+		}
+		builder.WriteString("\n")
+
+		// Subject line (usually only for OP)
+		if post.Subject != "" {
+			builder.WriteString(fmt.Sprintf("- **Subject:** %s\n", post.Subject))
+		}
+
+		// Media information and display
+		if post.Filename != "" || post.ArchivedMoeURL != "" {
+			builder.WriteString("- **Media:** ")
+			if post.Filename != "" {
+				builder.WriteString(fmt.Sprintf("`%s%s`", post.Filename, post.Ext))
+				if post.Fsize > 0 {
+					builder.WriteString(fmt.Sprintf(" (%s)", formatFileSize(post.Fsize)))
+				}
+				if post.W > 0 && post.H > 0 {
+					builder.WriteString(fmt.Sprintf(" [%dx%d]", post.W, post.H))
+				}
+			} else {
+				builder.WriteString("File attached")
+			}
+			builder.WriteString("\n")
+
+			// Add image display in markdown if it's an image file
+			if post.ArchivedMoeURL != "" && post.Ext != "" {
+				imageExts := []string{".jpg", ".jpeg", ".png", ".gif", ".webp"}
+				isImage := false
+				for _, ext := range imageExts {
+					if strings.ToLower(post.Ext) == ext {
+						isImage = true
+						break
+					}
+				}
+
+				if isImage {
+					builder.WriteString(fmt.Sprintf("\n![%s%s](%s)\n", post.Filename, post.Ext, post.ArchivedMoeURL))
+				} else {
+					// For non-image files, just show a link
+					builder.WriteString(fmt.Sprintf("\n[📎 %s%s](%s)\n", post.Filename, post.Ext, post.ArchivedMoeURL))
+				}
+			}
+		}
+
+		builder.WriteString("\n")
+
+		// Post content
+		if post.Comment != "" {
+			builder.WriteString("**Content:**\n\n")
+
+			// Clean and format the comment text
+			content := a.formatPostContentForMarkdown(post.Comment)
+			builder.WriteString(content)
+			builder.WriteString("\n\n")
+		}
+
+		// Separator between posts
+		if i < len(thread.Posts)-1 {
+			builder.WriteString("---\n\n")
+		}
+	}
+
+	// Write to file
+	return os.WriteFile(markdownPath, []byte(builder.String()), 0644)
+}
+
+// formatPostContentForMarkdown formats post content for markdown output
+func (a *Archiver) formatPostContentForMarkdown(content string) string {
+	// Convert line breaks
+	content = strings.ReplaceAll(content, "\n", "\n\n")
+
+	// Convert 4chan greentext to markdown quotes
+	lines := strings.Split(content, "\n")
+	var formattedLines []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			formattedLines = append(formattedLines, "")
+			continue
+		}
+
+		// Format greentext
+		if strings.HasPrefix(line, ">") && !strings.HasPrefix(line, ">>") {
+			formattedLines = append(formattedLines, fmt.Sprintf("> %s", strings.TrimPrefix(line, ">")))
+		} else if strings.HasPrefix(line, ">>") {
+			// Format post references
+			formattedLines = append(formattedLines, fmt.Sprintf("**%s**", line))
+		} else {
+			formattedLines = append(formattedLines, line)
+		}
+	}
+
+	return strings.Join(formattedLines, "\n")
+}
+
+// formatFileSize formats file size in human-readable format
+func formatFileSize(size int) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// establish4PlebsSession simulates real browsing by visiting the main page first
+func (a *Archiver) establish4PlebsSession() error {
+	if a.config.Verbose {
+		fmt.Printf("Establishing 4plebs session...\n")
+	}
+
+	// First, visit the main 4plebs page
+	mainReq, err := http.NewRequest("GET", "https://archive.4plebs.org/", nil)
+	if err != nil {
+		return err
+	}
+	a.setRealisticHeaders(mainReq, 1)
+
+	resp, err := a.client.Do(mainReq)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+
+	// Small delay like a real user
+	time.Sleep(time.Duration(1000+rand.Intn(2000)) * time.Millisecond)
+
+	// Then visit the board page
+	boardReq, err := http.NewRequest("GET", fmt.Sprintf("https://archive.4plebs.org/%s/", a.config.Board), nil)
+	if err != nil {
+		return err
+	}
+	a.setRealisticHeaders(boardReq, 1)
+
+	resp, err = a.client.Do(boardReq)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+
+	// Another small delay
+	time.Sleep(time.Duration(800+rand.Intn(1500)) * time.Millisecond)
+
+	if a.config.Verbose {
+		fmt.Printf("4plebs session established\n")
+	}
+
+	return nil
+}
+
+// Parse4PlebsHTML parses 4plebs HTML and extracts posts (exported for testing)
+func (a *Archiver) Parse4PlebsHTML(doc *goquery.Document, url string) (*Thread, error) {
+	thread := &Thread{Posts: []Post{}}
+
+	// Find the main thread post (OP)
+	doc.Find("article.thread").Each(func(i int, s *goquery.Selection) {
+		post := a.parse4PlebsPost(s, true)
+		if post != nil {
+			thread.Posts = append(thread.Posts, *post)
+		}
+	})
+
+	// Find reply posts
+	doc.Find("article.post").Each(func(i int, s *goquery.Selection) {
+		post := a.parse4PlebsPost(s, false)
+		if post != nil {
+			thread.Posts = append(thread.Posts, *post)
+		}
+	})
+
+	if len(thread.Posts) == 0 {
+		return nil, fmt.Errorf("no posts found in 4plebs page: %s", url)
+	}
+
+	return thread, nil
+}
+
+// Parse4ChanHTML parses 4chan HTML and extracts posts (exported for testing)
+func (a *Archiver) Parse4ChanHTML(doc *goquery.Document, url string) (*Thread, error) {
+	thread := &Thread{Posts: []Post{}}
+
+	// Find all post containers
+	doc.Find("div.postContainer").Each(func(i int, s *goquery.Selection) {
+		post := a.parse4ChanPost(s, i == 0)
+		if post != nil {
+			thread.Posts = append(thread.Posts, *post)
+		}
+	})
+
+	if len(thread.Posts) == 0 {
+		return nil, fmt.Errorf("no posts found in 4chan page: %s", url)
+	}
+
+	return thread, nil
+}
+
+// ParseHTML automatically detects the format and parses accordingly (exported for testing)
+func (a *Archiver) ParseHTML(doc *goquery.Document, url string) (*Thread, error) {
+	// Check if it's 4plebs format by looking for article.post or article.thread
+	if doc.Find("article.post, article.thread").Length() > 0 {
+		if a.config.Verbose {
+			fmt.Printf("Detected 4plebs format\n")
+		}
+		return a.Parse4PlebsHTML(doc, url)
+	}
+
+	// Check if it's 4chan format by looking for div.postContainer
+	if doc.Find("div.postContainer").Length() > 0 {
+		if a.config.Verbose {
+			fmt.Printf("Detected 4chan format\n")
+		}
+		return a.Parse4ChanHTML(doc, url)
+	}
+
+	return nil, fmt.Errorf("unknown HTML format for page: %s", url)
+}
+
+// parse4PlebsPost parses a single post from 4plebs HTML
+func (a *Archiver) parse4PlebsPost(s *goquery.Selection, isOP bool) *Post {
+	post := &Post{}
+
+	// Check if this is actually a post element by looking for essential attributes
+	id, hasId := s.Attr("id")
+	classes, _ := s.Attr("class")
+
+	// Skip non-post elements (like backlink containers, stubs, etc.)
+	if !hasId || id == "" || strings.Contains(classes, "backlink_container") || strings.Contains(classes, "stub") {
+		if a.config.Verbose && id != "" {
+			fmt.Printf("Skipping non-post element: id='%s' class='%s'\n", id, classes)
+		}
+		return nil
+	}
+
+	// Debug: Check what element we're parsing
+	if a.config.Verbose {
+		tagName := goquery.NodeName(s)
+		fmt.Printf("Parsing element: <%s> id='%s' class='%s'\n", tagName, id, classes)
+	}
+
+	// Get post number from id attribute - this is the REAL post number from 4chan
+	if postNo, err := strconv.ParseInt(id, 10, 64); err == nil && postNo > 0 {
+		post.No = postNo
+		post.Tim = postNo // Use the real post number as Tim too
+		if a.config.Verbose {
+			fmt.Printf("Extracted post number from id: %d\n", postNo)
+		}
+	} else {
+		if a.config.Verbose {
+			fmt.Printf("Warning: Could not extract post number from element. ID: '%s'\n", id)
+		}
+		return nil
+	}
+
+	// Get author name - try multiple selectors but process only the FIRST one
+	authorSelectors := []string{".post_author", ".author", ".name", ".nameBlock"}
+	for _, selector := range authorSelectors {
+		authorEl := s.Find(selector).First() // Take only the first match
+		if authorEl.Length() > 0 {
+			authorText := strings.TrimSpace(authorEl.Text())
+			if authorText != "" && authorText != "Anonymous" {
+				// Clean up any remaining concatenation issues
+				if strings.Contains(authorText, "CIA OP") {
+					authorText = "CIA OP"
+				}
+				post.Name = authorText
+				break
+			}
+		}
+	}
+	if post.Name == "" {
+		post.Name = "Anonymous"
+	}
+
+	// Get tripcode - only from the first matching element
+	tripcodeSelectors := []string{".post_tripcode", ".postertrip", ".tripcode"}
+	for _, selector := range tripcodeSelectors {
+		tripcodeEl := s.Find(selector).First() // Take only the first match
+		if tripcodeEl.Length() > 0 {
+			tripcodeText := strings.TrimSpace(tripcodeEl.Text())
+			if tripcodeText != "" {
+				post.Trip = tripcodeText
+				break
+			}
+		}
+	}
+
+	// Get user ID - only from the first matching element
+	userIDSelectors := []string{".poster_hash", ".posteruid", ".hand", ".post_id"}
+	for _, selector := range userIDSelectors {
+		idEl := s.Find(selector).First() // Take only the first match
+		if idEl.Length() > 0 {
+			idText := strings.TrimSpace(idEl.Text())
+			if idText != "" {
+				post.ID = idText
+				break
+			}
+		}
+	}
+
+	// Get timestamp
+	timeSelectors := []string{"time", ".dateTime", ".timestamp"}
+	for _, selector := range timeSelectors {
+		timeEl := s.Find(selector).First() // Take only the first match
+		if timeEl.Length() > 0 {
+			if datetimeAttr, exists := timeEl.Attr("datetime"); exists {
+				if timestamp, err := time.Parse(time.RFC3339, datetimeAttr); err == nil {
+					post.Time = timestamp.Unix()
+					break
+				}
+			}
+		}
+	}
+
+	// Get post content - only from the first text div
+	contentSelectors := []string{".text", ".postMessage", ".message", ".comment"}
+	for _, selector := range contentSelectors {
+		contentEl := s.Find(selector).First() // Take only the first match
+		if contentEl.Length() > 0 {
+			// Get both text and HTML content
+			textContent := strings.TrimSpace(contentEl.Text())
+			htmlContent, _ := contentEl.Html()
+
+			if textContent != "" {
+				post.Comment = htmlContent
+				break
+			}
+		}
+	}
+
+	// Get media information - only from the first media element
+	if s.HasClass("has_image") || s.Find(".post_file, .file, .fileThumb").Length() > 0 {
+		mediaEl := s.Find(".post_file, .file, .fileThumb").First() // Take only the first match
+		if mediaEl.Length() > 0 {
+			// Get filename
+			if link := mediaEl.Find("a").First(); link.Length() > 0 {
+				if href, exists := link.Attr("href"); exists {
+					post.Filename = filepath.Base(href)
+				}
+
+				// Get filename and extension from title if available
+				if title, exists := link.Attr("title"); exists && title != "" {
+					post.Filename = strings.TrimSpace(title)
+				}
+			}
+
+			// Get thumbnail
+			if img := mediaEl.Find("img").First(); img.Length() > 0 {
+				if src, exists := img.Attr("src"); exists {
+					post.ArchivedMoeURL = src // Store thumbnail URL here
+				}
+			}
+
+			post.Ext = filepath.Ext(post.Filename)
+			if post.Ext != "" {
+				post.Fsize = 1 // We have a file
+			}
+		}
+	}
+
+	// Get country and flag information
+	country, countryName := a.extractCountryInfo(s)
+	flag, flagName := a.extractFlagInfo(s)
+	post.Country = country
+	post.CountryName = countryName
+	post.Flag = flag
+	post.FlagName = flagName
+
+	// Get media information
+
+	// Debug output with clean data
+	if a.config.Verbose {
+		fmt.Printf("✓ Parsed post #%d: author='%s', tripcode='%s', id='%s', content_length=%d, media=%t\n",
+			post.No, post.Name, post.Trip, post.ID, len(post.Comment), post.Fsize > 0)
+	}
+
+	return post
+}
+
+// parse4ChanPost parses a single post from 4chan HTML
+func (a *Archiver) parse4ChanPost(s *goquery.Selection, isOP bool) *Post {
+	post := &Post{}
+
+	// Debug: Check what element we're parsing
+	if a.config.Verbose {
+		tagName := goquery.NodeName(s)
+		classes, _ := s.Attr("class")
+		id, _ := s.Attr("id")
+		fmt.Printf("Parsing 4chan element: <%s> id='%s' class='%s'\n", tagName, id, classes)
+	}
+
+	// Get the actual post div inside the container
+	postDiv := s.Find("div.post")
+	if postDiv.Length() == 0 {
+		postDiv = s // Sometimes the selection itself is the post
+	}
+
+	// Get post number from id attribute
+	if id, exists := postDiv.Attr("id"); exists && id != "" {
+		// 4chan post IDs are usually in format "p123456" or "m123456"
+		if strings.HasPrefix(id, "p") || strings.HasPrefix(id, "m") {
+			numStr := id[1:] // Remove the prefix
+			if postNo, err := strconv.ParseInt(numStr, 10, 64); err == nil && postNo > 0 {
+				post.No = postNo
+				post.Tim = postNo
+				if a.config.Verbose {
+					fmt.Printf("Extracted 4chan post number from id: %d\n", postNo)
+				}
+			}
+		} else if postNo, err := strconv.ParseInt(id, 10, 64); err == nil && postNo > 0 {
+			// Sometimes it's just the number
+			post.No = postNo
+			post.Tim = postNo
+			if a.config.Verbose {
+				fmt.Printf("Extracted 4chan post number from id: %d\n", postNo)
+			}
+		}
+	}
+
+	// If no post number found, try other methods
+	if post.No == 0 {
+		// Try to find post number in post info
+		postDiv.Find(".postInfo, .post_info").Each(func(i int, infoEl *goquery.Selection) {
+			// Look for post number in desktop format
+			infoEl.Find(".postNum a").Each(func(j int, link *goquery.Selection) {
+				href, _ := link.Attr("href")
+				if strings.HasPrefix(href, "#p") {
+					numStr := strings.TrimPrefix(href, "#p")
+					if postNo, err := strconv.ParseInt(numStr, 10, 64); err == nil && postNo > 0 {
+						post.No = postNo
+						post.Tim = postNo
+						if a.config.Verbose {
+							fmt.Printf("Extracted 4chan post number from postNum link: %d\n", postNo)
+						}
+					}
+				}
+			})
+
+			// Look for post number in mobile format
+			if post.No == 0 {
+				text := infoEl.Text()
+				if match := regexp.MustCompile(`No\.(\d+)`).FindStringSubmatch(text); len(match) > 1 {
+					if postNo, err := strconv.ParseInt(match[1], 10, 64); err == nil && postNo > 0 {
+						post.No = postNo
+						post.Tim = postNo
+						if a.config.Verbose {
+							fmt.Printf("Extracted 4chan post number from info text: %d\n", postNo)
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Get timestamp
+	postDiv.Find("span.dateTime").Each(func(i int, timeEl *goquery.Selection) {
+		if unixtime, exists := timeEl.Attr("data-utc"); exists {
+			if timestamp, err := strconv.ParseInt(unixtime, 10, 64); err == nil {
+				post.Time = timestamp
+			}
+		}
+	})
+
+	// Get author name - try multiple selectors
+	nameSelectors := []string{".name", ".nameBlock .name"}
+	for _, selector := range nameSelectors {
+		nameEl := postDiv.Find(selector)
+		if nameEl.Length() > 0 {
+			nameText := strings.TrimSpace(nameEl.Text())
+			if nameText != "" {
+				// Remove duplicates that sometimes occur in 4chan parsing
+				if strings.Contains(nameText, nameText[:len(nameText)/2]) && len(nameText) > 10 {
+					nameText = nameText[:len(nameText)/2]
+				}
+				post.Name = nameText
+				break
+			}
+		}
+	}
+	if post.Name == "" {
+		post.Name = "Anonymous"
+	}
+
+	// Get tripcode - try multiple selectors
+	tripcodeSelectors := []string{".postertrip", ".nameBlock .postertrip"}
+	for _, selector := range tripcodeSelectors {
+		tripEl := postDiv.Find(selector)
+		if tripEl.Length() > 0 {
+			tripText := strings.TrimSpace(tripEl.Text())
+			if tripText != "" {
+				post.Trip = tripText
+				break
+			}
+		}
+	}
+
+	// Get poster ID - try multiple selectors
+	idSelectors := []string{".hand", ".posteruid", ".uid"}
+	for _, selector := range idSelectors {
+		idEl := postDiv.Find(selector)
+		if idEl.Length() > 0 {
+			idText := strings.TrimSpace(idEl.Text())
+			// Clean up ID text - remove common patterns and duplicates
+			idText = strings.TrimPrefix(idText, "ID:")
+			idText = strings.TrimPrefix(idText, "(ID: ")
+			idText = strings.TrimSuffix(idText, ")")
+			idText = strings.TrimSpace(idText)
+
+			// Remove duplicates that sometimes occur in 4chan parsing
+			if len(idText) > 8 && strings.Contains(idText, idText[:len(idText)/2]) {
+				idText = idText[:len(idText)/2]
+			}
+
+			if idText != "" {
+				post.ID = idText
+				break
+			}
+		}
+	}
+
+	// Get country flag
+	flagSelectors := []string{".flag", ".countryFlag"}
+	for _, selector := range flagSelectors {
+		flagEl := postDiv.Find(selector)
+		if flagEl.Length() > 0 {
+			if title, exists := flagEl.Attr("title"); exists && title != "" {
+				// Store country info, but don't overwrite existing ID
+				if post.ID == "" {
+					post.ID = title
+				}
+				break
+			}
+		}
+	}
+
+	// Get subject
+	subjectSelectors := []string{".subject", ".filetitle"}
+	for _, selector := range subjectSelectors {
+		subjectEl := postDiv.Find(selector)
+		if subjectEl.Length() > 0 {
+			subjectText := strings.TrimSpace(subjectEl.Text())
+			if subjectText != "" {
+				post.Subject = subjectText
+				break
+			}
+		}
+	}
+
+	// Get comment text
+	commentSelectors := []string{".postMessage", "blockquote", ".comment"}
+	for _, selector := range commentSelectors {
+		commentEl := postDiv.Find(selector)
+		if commentEl.Length() > 0 {
+			html, _ := commentEl.Html()
+			if html != "" {
+				post.Comment = cleanHTMLText(html)
+				break
+			}
+			textContent := strings.TrimSpace(commentEl.Text())
+			if textContent != "" {
+				post.Comment = textContent
+				break
+			}
+		}
+	}
+
+	// Get media information
+	fileSelectors := []string{".file", ".fileThumb"}
+	for _, selector := range fileSelectors {
+		fileDiv := postDiv.Find(selector)
+		if fileDiv.Length() > 0 {
+			// Get image link
+			fileDiv.Find("a").Each(func(i int, link *goquery.Selection) {
+				href, exists := link.Attr("href")
+				if !exists || href == "" {
+					return
+				}
+
+				// Convert relative URLs to absolute
+				if strings.HasPrefix(href, "//") {
+					href = "https:" + href
+				} else if strings.HasPrefix(href, "/") {
+					href = "https://i.4cdn.org" + href
+				}
+
+				post.ArchivedMoeURL = href
+
+				// Get filename and extension
+				if title, exists := link.Attr("title"); exists && title != "" {
+					post.Filename = strings.TrimSpace(title)
+				}
+
+				// Extract extension from URL
+				if idx := strings.LastIndex(href, "."); idx != -1 {
+					ext := href[idx:]
+					if qIdx := strings.Index(ext, "?"); qIdx != -1 {
+						ext = ext[:qIdx]
+					}
+					post.Ext = ext
+				}
+
+				// Get file info
+				fileText := fileDiv.Find(".fileText")
+				if fileText.Length() > 0 {
+					text := fileText.Text()
+					// Extract file size
+					if match := regexp.MustCompile(`(\d+(?:\.\d+)?)\s*([KMGT]?)B`).FindStringSubmatch(text); len(match) > 2 {
+						if size, err := strconv.ParseFloat(match[1], 64); err == nil {
+							multiplier := 1.0
+							switch match[2] {
+							case "K":
+								multiplier = 1024
+							case "M":
+								multiplier = 1024 * 1024
+							case "G":
+								multiplier = 1024 * 1024 * 1024
+							case "T":
+								multiplier = 1024 * 1024 * 1024 * 1024
+							}
+							post.Fsize = int(size * multiplier)
+						}
+					}
+
+					// Extract dimensions
+					if match := regexp.MustCompile(`(\d+)x(\d+)`).FindStringSubmatch(text); len(match) > 2 {
+						if w, err := strconv.Atoi(match[1]); err == nil {
+							post.W = w
+						}
+						if h, err := strconv.Atoi(match[2]); err == nil {
+							post.H = h
+						}
+					}
+				}
+
+				return // Only process the first valid file
+			})
+
+			if post.ArchivedMoeURL != "" {
+				break // Found media, break out of selector loop
+			}
+		}
+	}
+
+	// Only return posts with valid post numbers
+	if post.No == 0 {
+		if a.config.Verbose {
+			fmt.Printf("Warning: Could not extract post number from 4chan post\n")
+		}
+		return nil
+	}
+
+	if a.config.Verbose {
+		fmt.Printf("✓ Parsed 4chan post #%d: author='%s', tripcode='%s', id='%s', content_length=%d, media=%v\n",
+			post.No, post.Name, post.Trip, post.ID, len(post.Comment), post.ArchivedMoeURL != "")
+	}
+
+	return post
+}
+
+// ExtractToDatabase extracts thread data to database with enhanced parsing (exported for testing)
+func (a *Archiver) ExtractToDatabase(ctx context.Context, queries *database.Queries, thread *Thread, threadID, board string) error {
+	// Determine source based on config
+	source := a.config.Source
+	if source == SourceAuto {
+		source = "auto"
+	}
+
+	// Insert thread record with enhanced fields
+	_, err := queries.CreateThread(ctx, database.CreateThreadParams{
+		ThreadID:    threadID,
+		Board:       board,
+		Subject:     getThreadSubject(thread),
+		Source:      source,
+		SourceUrl:   stringToSqlNull(fmt.Sprintf("https://example.com/%s/thread/%s", board, threadID)), // Placeholder
+		CreatedAt:   time.Now(),
+		LastUpdated: time.Now(),
+		PostsCount:  sql.NullInt64{Valid: true, Int64: int64(len(thread.Posts))},
+		MediaCount:  sql.NullInt64{Valid: true, Int64: int64(countMediaPosts(thread))},
+		Status:      sql.NullString{Valid: true, String: "archived"},
+	})
+	if err != nil {
+		// Ignore unique constraint errors
+		if a.config.Verbose {
+			fmt.Printf("Warning: Failed to insert thread record: %v\n", err)
+		}
+	}
+
+	// Extract and insert posts with enhanced parsing
+	for i, post := range thread.Posts {
+		isOP := i == 0
+
+		// Generate content hash for deduplication
+		contentHash := a.generateContentHash(post.Comment)
+
+		// Determine if media was successfully processed
+		hasMediaProcessed := post.Tim != 0 && post.Ext != "" && (post.ArchivedMoeURL != "" || post.Filename != "")
+
+		// Insert post using enhanced data (country/flag info already extracted during HTML parsing)
+		_, err = queries.CreatePost(ctx, database.CreatePostParams{
+			ThreadID:          threadID,
+			Board:             board,
+			PostNo:            post.No,
+			Timestamp:         post.Time,
+			Name:              post.Name,
+			Tripcode:          stringToSqlNull(post.Trip),
+			UserID:            stringToSqlNull(post.ID),
+			Country:           stringToSqlNull(post.Country),
+			CountryName:       stringToSqlNull(post.CountryName),
+			Flag:              stringToSqlNull(post.Flag),
+			FlagName:          stringToSqlNull(post.FlagName),
+			Subject:           stringToSqlNull(post.Subject),
+			Comment:           stringToSqlNull(post.Comment),
+			CleanText:         stringToSqlNull(cleanHTMLText(post.Comment)),
+			ContentHash:       stringToSqlNull(contentHash),
+			Source:            source,
+			ParsingStatus:     "success",
+			Filename:          stringToSqlNull(post.Filename),
+			FileExt:           stringToSqlNull(post.Ext),
+			FileSize:          intToSqlNull(int64(post.Fsize)),
+			ImageWidth:        intToSqlNull(int64(post.W)),
+			ImageHeight:       intToSqlNull(int64(post.H)),
+			ThumbnailWidth:    sql.NullInt64{},
+			ThumbnailHeight:   sql.NullInt64{},
+			Md5Hash:           stringToSqlNull(post.MD5),
+			IsOp:              sql.NullBool{Valid: true, Bool: isOP},
+			HasMediaProcessed: sql.NullBool{Valid: true, Bool: hasMediaProcessed},
+		})
+		if err != nil && a.config.Verbose {
+			fmt.Printf("Warning: Failed to insert post %d: %v\n", post.No, err)
+		}
+
+		// Insert user if has ID with enhanced tracking
+		if post.ID != "" {
+			err = queries.UpsertUser(ctx, database.UpsertUserParams{
+				Board:           board,
+				UserID:          post.ID,
+				Name:            post.Name,
+				Tripcode:        stringToSqlNull(post.Trip),
+				Country:         stringToSqlNull(post.Country),
+				CountryName:     stringToSqlNull(post.CountryName),
+				Flag:            stringToSqlNull(post.Flag),
+				FlagName:        stringToSqlNull(post.FlagName),
+				FirstSeen:       time.Unix(post.Time, 0),
+				LastSeen:        time.Unix(post.Time, 0),
+				TotalMediaPosts: intToSqlNull(int64(boolToInt(hasMediaProcessed))),
+				AvgPostLength:   floatToSqlNull(float64(len(post.Comment))),
+				MostCommonBoard: stringToSqlNull(board),
+			})
+			if err != nil && a.config.Verbose {
+				fmt.Printf("Warning: Failed to upsert user %s: %v\n", post.ID, err)
+			}
+		}
+
+		// Enhanced reply/quote extraction
+		err = a.extractRepliesAndQuotes(ctx, queries, post, threadID, board)
+		if err != nil && a.config.Verbose {
+			fmt.Printf("Warning: Failed to extract replies for post %d: %v\n", post.No, err)
+		}
+
+		// Insert enhanced media record if post has media
+		if post.Tim != 0 && post.Ext != "" {
+			mediaFilename := fmt.Sprintf("%d_%s%s", post.No, post.Filename, post.Ext)
+			localPath := filepath.Join(MediaDirName, mediaFilename)
+
+			// Determine media type
+			mediaType := a.determineMediaType(post.Ext)
+
+			// Get source URL
+			sourceURL := a.getMediaSourceURL(post, board)
+
+			_, err = queries.CreateMedia(ctx, database.CreateMediaParams{
+				ThreadID:            threadID,
+				Board:               board,
+				PostNo:              post.No,
+				Filename:            mediaFilename,
+				OriginalFilename:    stringToSqlNull(post.Filename + post.Ext),
+				FileExt:             stringToSqlNull(post.Ext),
+				FileSize:            intToSqlNull(int64(post.Fsize)),
+				Width:               intToSqlNull(int64(post.W)),
+				Height:              intToSqlNull(int64(post.H)),
+				Md5Hash:             stringToSqlNull(post.MD5),
+				MediaType:           stringToSqlNull(mediaType),
+				SourceUrl:           stringToSqlNull(sourceURL),
+				ThumbnailUrl:        stringToSqlNull(post.ArchivedMoeURL), // Use this for thumbnail
+				LocalPath:           stringToSqlNull(localPath),
+				DownloadStatus:      sql.NullString{Valid: true, String: "downloaded"},
+				DownloadAttempts:    sql.NullInt64{Valid: true, Int64: 1},
+				LastDownloadAttempt: sql.NullTime{Valid: true, Time: time.Now()},
+			})
+			if err != nil && a.config.Verbose {
+				fmt.Printf("Warning: Failed to insert media record for post %d: %v\n", post.No, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// extractCountryInfo extracts country information from post HTML element
+func (a *Archiver) extractCountryInfo(postElement *goquery.Selection) (country, countryName string) {
+	// 4chan format: <span title="Germany" class="flag flag-de"></span>
+	flagElement := postElement.Find("span.flag")
+	if flagElement.Length() > 0 {
+		if title, exists := flagElement.Attr("title"); exists && title != "" {
+			// Extract country name from title
+			countryName = strings.TrimSpace(title)
+			// For 4plebs, remove the extra text
+			if strings.Contains(countryName, ". Click here to search") {
+				countryName = strings.Split(countryName, ".")[0]
+			}
+		}
+
+		// Extract country code from class
+		if class, exists := flagElement.Attr("class"); exists && class != "" {
+			// Look for pattern like "flag flag-de" or "flag-pol2 flag-ct"
+			classes := strings.Split(class, " ")
+			for _, cls := range classes {
+				if strings.HasPrefix(cls, "flag-") && len(cls) > 5 {
+					// Remove "flag-" prefix to get country code
+					code := strings.TrimPrefix(cls, "flag-")
+					// Skip pol2 or other prefixes for troll flags
+					if len(code) == 2 && !strings.Contains(code, "pol") {
+						country = strings.ToUpper(code)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// If we got country name but no code, try to derive code
+	if countryName != "" && country == "" {
+		country = a.deriveCountryCode(countryName)
+	}
+
+	return country, countryName
+}
+
+// extractFlagInfo extracts flag information from post HTML element (includes troll flags)
+func (a *Archiver) extractFlagInfo(postElement *goquery.Selection) (flag, flagName string) {
+	// Look for both regular flags and troll flags
+	flagSelectors := []string{
+		"span.flag",      // Regular flags
+		"span.flag-pol2", // Troll flags on /pol/
+	}
+
+	for _, selector := range flagSelectors {
+		flagElement := postElement.Find(selector)
+		if flagElement.Length() > 0 {
+			if title, exists := flagElement.Attr("title"); exists && title != "" {
+				flagName = strings.TrimSpace(title)
+				// Clean up 4plebs format
+				if strings.Contains(flagName, ". Click here to search") {
+					flagName = strings.Split(flagName, ".")[0]
+				}
+			}
+
+			if class, exists := flagElement.Attr("class"); exists && class != "" {
+				// Extract flag code from class
+				classes := strings.Split(class, " ")
+				for _, cls := range classes {
+					if strings.HasPrefix(cls, "flag-") {
+						code := strings.TrimPrefix(cls, "flag-")
+						// Remove any additional prefixes
+						if strings.HasPrefix(code, "pol2-") {
+							code = strings.TrimPrefix(code, "pol2-")
+						}
+						flag = strings.ToUpper(code)
+						break
+					}
+				}
+			}
+			break
+		}
+	}
+
+	return flag, flagName
+}
+
+// deriveCountryCode attempts to map country names to ISO codes
+func (a *Archiver) deriveCountryCode(countryName string) string {
+	countryMap := map[string]string{
+		"United States":  "US",
+		"Germany":        "DE",
+		"Netherlands":    "NL",
+		"France":         "FR",
+		"Canada":         "CA",
+		"Australia":      "AU",
+		"United Kingdom": "GB",
+		"Poland":         "PL",
+		"Israel":         "IL",
+		"Egypt":          "EG",
+		"China":          "CN",
+		"Japan":          "JP",
+		"Russia":         "RU",
+		"Brazil":         "BR",
+		"Mexico":         "MX",
+		"India":          "IN",
+		"South Korea":    "KR",
+		"Italy":          "IT",
+		"Spain":          "ES",
+		"Sweden":         "SE",
+		"Norway":         "NO",
+		"Finland":        "FI",
+		"Denmark":        "DK",
+		"Czech Republic": "CZ",
+		"Austria":        "AT",
+		"Switzerland":    "CH",
+		"Belgium":        "BE",
+		"Portugal":       "PT",
+		"Greece":         "GR",
+		"Turkey":         "TR",
+		"Saudi Arabia":   "SA",
+		"Singapore":      "SG",
+		"Ukraine":        "UA",
+		"Romania":        "RO",
+		"Hungary":        "HU",
+		"Croatia":        "HR",
+		"Slovakia":       "SK",
+		"Slovenia":       "SI",
+		"Bulgaria":       "BG",
+		"Serbia":         "RS",
+		"Lithuania":      "LT",
+		"Latvia":         "LV",
+		"Estonia":        "EE",
+	}
+
+	if code, exists := countryMap[countryName]; exists {
+		return code
+	}
+
+	return ""
+}
+
+// extractRepliesAndQuotes extracts reply and quote relationships from post content
+func (a *Archiver) extractRepliesAndQuotes(ctx context.Context, queries *database.Queries, post Post, threadID, board string) error {
+	if post.Comment == "" {
+		return nil
+	}
+
+	// Extract direct replies (>>123456 patterns)
+	replyNumbers := extractReplyNumbers(post.Comment)
+	for _, replyTo := range replyNumbers {
+		// Check if reply already exists
+		count, err := queries.ReplyExists(ctx, database.ReplyExistsParams{
+			ThreadID:  threadID,
+			Board:     board,
+			FromPost:  post.No,
+			ToPost:    replyTo,
+			ReplyType: "direct",
+		})
+		if err != nil {
+			continue
+		}
+
+		// Only insert if it doesn't exist
+		if count == 0 {
+			err = queries.CreateReply(ctx, database.CreateReplyParams{
+				ThreadID:  threadID,
+				Board:     board,
+				FromPost:  post.No,
+				ToPost:    replyTo,
+				ReplyType: "direct",
+			})
+			if err != nil && a.config.Verbose {
+				fmt.Printf("Warning: Failed to insert reply %d->%d: %v\n", post.No, replyTo, err)
+			}
+		}
+	}
+
+	// Extract quotes (greentext) - TODO: Add quotes.sql with CreateQuote method
+	quotes := a.extractQuotes(post.Comment)
+	for _, quote := range quotes {
+		_, err := queries.CreateQuote(ctx, database.CreateQuoteParams{
+			ThreadID:  threadID,
+			Board:     board,
+			PostNo:    post.No,
+			QuoteText: quote.Text,
+			QuoteType: quote.Type,
+		})
+		if err != nil && a.config.Verbose {
+			fmt.Printf("Warning: Failed to insert quote for post %d: %v\n", post.No, err)
+		}
+	}
+
+	return nil
+}
+
+// Quote represents a quote extracted from post content
+type Quote struct {
+	Text string
+	Type string // "greentext", "regular"
+}
+
+// extractQuotes extracts greentext and other quotes from post content
+func (a *Archiver) extractQuotes(content string) []Quote {
+	var quotes []Quote
+
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, ">") && !strings.HasPrefix(line, ">>") {
+			// It's greentext
+			quoteText := strings.TrimPrefix(line, ">")
+			quotes = append(quotes, Quote{
+				Text: strings.TrimSpace(quoteText),
+				Type: "greentext",
+			})
+		}
+	}
+
+	return quotes
+}
+
+// CreateMarkdownFromDatabase generates markdown from database data with clickable links (exported)
+func (a *Archiver) CreateMarkdownFromDatabase(ctx context.Context, queries *database.Queries, threadID, board, outputPath string) error {
+	// Get all posts for the thread
+	posts, err := queries.GetPostsByThread(ctx, database.GetPostsByThreadParams{
+		ThreadID: threadID,
+		Board:    board,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get posts: %w", err)
+	}
+
+	// Get conversation tree for the thread
+	conversations, err := queries.GetConversationTree(ctx, database.GetConversationTreeParams{
+		ThreadID: threadID,
+		Board:    board,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get conversation tree: %w", err)
+	}
+
+	// Build reply map for "Quoted By" sections
+	quotedBy := make(map[int64][]int64)
+	for _, conv := range conversations {
+		quotedBy[conv.ToPost] = append(quotedBy[conv.ToPost], conv.FromPost)
+	}
+
+	var builder strings.Builder
+
+	// Write header
+	builder.WriteString(fmt.Sprintf("# Thread %s\n\n", threadID))
+	builder.WriteString(fmt.Sprintf("**Board:** /%s/\n", board))
+	builder.WriteString(fmt.Sprintf("**Archived:** %s\n", time.Now().UTC().Format("2006-01-02 15:04:05 UTC")))
+	builder.WriteString(fmt.Sprintf("**Posts:** %d\n\n", len(posts)))
+	builder.WriteString("---\n\n")
+
+	// Process each post
+	for i, post := range posts {
+		isOP := post.IsOp.Bool
+
+		// Post header with anchor
+		if isOP {
+			builder.WriteString(fmt.Sprintf("## <a name=\"%d\"></a>Original Post\n\n", post.PostNo))
+		} else {
+			builder.WriteString(fmt.Sprintf("## <a name=\"%d\"></a>Post #%d\n\n", post.PostNo, post.PostNo))
+		}
+
+		// Post metadata
+		builder.WriteString("**Post Info:**\n")
+		builder.WriteString(fmt.Sprintf("- **Post Number:** [%d](#%d)\n", post.PostNo, post.PostNo))
+
+		// Format timestamp
+		if post.Timestamp > 0 {
+			timestamp := time.Unix(post.Timestamp, 0).UTC()
+			builder.WriteString(fmt.Sprintf("- **Date:** %s\n", timestamp.Format("2006-01-02 15:04:05 UTC")))
+		}
+
+		// Author information with country/flag
+		builder.WriteString(fmt.Sprintf("- **Author:** %s", post.Name))
+		if post.Country.Valid && post.Country.String != "" {
+			emoji := getCountryEmoji(post.Country.String)
+			if post.CountryName.Valid {
+				builder.WriteString(fmt.Sprintf(" %s %s", emoji, post.CountryName.String))
+			} else {
+				builder.WriteString(fmt.Sprintf(" %s %s", emoji, post.Country.String))
+			}
+		}
+		if post.UserID.Valid && post.UserID.String != "" {
+			builder.WriteString(fmt.Sprintf(" (ID: %s)", post.UserID.String))
+		}
+		builder.WriteString("\n")
+
+		// Subject line
+		if post.Subject.Valid && post.Subject.String != "" {
+			builder.WriteString(fmt.Sprintf("- **Subject:** %s\n", post.Subject.String))
+		}
+
+		// Media information
+		if post.Filename.Valid && post.Filename.String != "" {
+			builder.WriteString("- **Media:** ")
+			builder.WriteString(fmt.Sprintf("`%s%s`", post.Filename.String, post.FileExt.String))
+			if post.FileSize.Valid && post.FileSize.Int64 > 0 {
+				builder.WriteString(fmt.Sprintf(" (%s)", formatFileSize(int(post.FileSize.Int64))))
+			}
+			if post.ImageWidth.Valid && post.ImageHeight.Valid && post.ImageWidth.Int64 > 0 && post.ImageHeight.Int64 > 0 {
+				builder.WriteString(fmt.Sprintf(" [%dx%d]", post.ImageWidth.Int64, post.ImageHeight.Int64))
+			}
+			builder.WriteString("\n")
+		}
+
+		// Quoted By section with clickable links
+		if replies, exists := quotedBy[post.PostNo]; exists && len(replies) > 0 {
+			builder.WriteString("- **Quoted By:** ")
+			for i, replyPost := range replies {
+				if i > 0 {
+					builder.WriteString(", ")
+				}
+				builder.WriteString(fmt.Sprintf("[>>%d](#%d)", replyPost, replyPost))
+			}
+			builder.WriteString("\n")
+		}
+
+		builder.WriteString("\n")
+
+		// Post content with clickable reply links
+		if post.CleanText.Valid && post.CleanText.String != "" {
+			builder.WriteString("**Content:**\n\n")
+			content := a.formatPostContentWithLinks(post.CleanText.String)
+			builder.WriteString(content)
+			builder.WriteString("\n\n")
+		}
+
+		// Separator between posts
+		if i < len(posts)-1 {
+			builder.WriteString("---\n\n")
+		}
+	}
+
+	// Write to file
+	return os.WriteFile(outputPath, []byte(builder.String()), 0644)
+}
+
+// formatPostContentWithLinks formats post content with clickable reply links
+func (a *Archiver) formatPostContentWithLinks(content string) string {
+	// Convert >>123456 to clickable links
+	content = strings.ReplaceAll(content, "&gt;&gt;", ">>")
+
+	// Replace >>123456 with [>>123456](#123456)
+	lines := strings.Split(content, "\n")
+	var formattedLines []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			formattedLines = append(formattedLines, "")
+			continue
+		}
+
+		// Format greentext
+		if strings.HasPrefix(line, ">") && !strings.HasPrefix(line, ">>") {
+			formattedLines = append(formattedLines, fmt.Sprintf("> %s", strings.TrimPrefix(line, ">")))
+		} else {
+			// Convert >>123456 to clickable links
+			for i := 0; i < len(line)-2; i++ {
+				if line[i:i+2] == ">>" {
+					// Find the number
+					j := i + 2
+					for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+						j++
+					}
+					if j > i+2 {
+						postNo := line[i+2 : j]
+						replacement := fmt.Sprintf("[>>%s](#%s)", postNo, postNo)
+						line = line[:i] + replacement + line[j:]
+						i += len(replacement) - 1
+					}
+				}
+			}
+			formattedLines = append(formattedLines, line)
+		}
+	}
+
+	return strings.Join(formattedLines, "\n")
+}
+
+// getCountryEmoji returns emoji for country codes
+func getCountryEmoji(countryCode string) string {
+	// Map common country codes to emojis
+	countryEmojis := map[string]string{
+		"US": "🇺🇸",
+		"GB": "🇬🇧",
+		"CA": "🇨🇦",
+		"AU": "🇦🇺",
+		"DE": "🇩🇪",
+		"FR": "🇫🇷",
+		"JP": "🇯🇵",
+		"EG": "🇪🇬", // Egypt
+		"CN": "🇨🇳",
+		"RU": "🇷🇺",
+		"BR": "🇧🇷",
+		"MX": "🇲🇽",
+		"IN": "🇮🇳",
+		"KR": "🇰🇷",
+		"IT": "🇮🇹",
+		"ES": "🇪🇸",
+		"NL": "🇳🇱",
+		"SE": "🇸🇪",
+		"NO": "🇳🇴",
+		"FI": "🇫🇮",
+		"DK": "🇩🇰",
+		"PL": "🇵🇱",
+		"CZ": "🇨🇿",
+		"AT": "🇦🇹",
+		"CH": "🇨🇭",
+		"BE": "🇧🇪",
+		"PT": "🇵🇹",
+		"GR": "🇬🇷",
+		"TR": "🇹🇷",
+		"IL": "🇮🇱",
+		"SA": "🇸🇦",
+		"AE": "🇦🇪",
+		"SG": "🇸🇬",
+		"MY": "🇲🇾",
+		"TH": "🇹🇭",
+		"PH": "🇵🇭",
+		"ID": "🇮🇩",
+		"VN": "🇻🇳",
+		"TW": "🇹🇼",
+		"HK": "🇭🇰",
+		"NZ": "🇳🇿",
+		"ZA": "🇿🇦",
+		"NG": "🇳🇬",
+		"MA": "🇲🇦",
+		"AR": "🇦🇷",
+		"CL": "🇨🇱",
+		"CO": "🇨🇴",
+		"PE": "🇵🇪",
+		"VE": "🇻🇪",
+		"UY": "🇺🇾",
+		"EC": "🇪🇨",
+		"BO": "🇧🇴",
+		"PY": "🇵🇾",
+	}
+
+	if emoji, exists := countryEmojis[strings.ToUpper(countryCode)]; exists {
+		return emoji
+	}
+	return "🏳️" // Default flag
+}
+
+// Helper functions for enhanced database extraction
+
+// generateContentHash creates a hash of the post content for deduplication
+func (a *Archiver) generateContentHash(content string) string {
+	if content == "" {
+		return ""
+	}
+	// Simple hash based on content length and first/last characters
+	// This is a placeholder - could be enhanced with proper cryptographic hash
+	if len(content) < 10 {
+		return fmt.Sprintf("hash_%d_%s", len(content), content)
+	}
+	return fmt.Sprintf("hash_%d_%c%c", len(content), content[0], content[len(content)-1])
+}
+
+// determineMediaType categorizes media files by extension
+func (a *Archiver) determineMediaType(ext string) string {
+	if ext == "" {
+		return "other"
+	}
+
+	ext = strings.ToLower(ext)
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".avif":
+		return "image"
+	case ".mp4", ".webm", ".avi", ".mov", ".wmv", ".mkv":
+		return "video"
+	case ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a":
+		return "audio"
+	case ".pdf", ".txt", ".doc", ".docx", ".rtf":
+		return "document"
+	case ".zip", ".rar", ".7z", ".tar", ".gz":
+		return "archive"
+	default:
+		return "other"
+	}
+}
+
+// getMediaSourceURL constructs the source URL for media files
+func (a *Archiver) getMediaSourceURL(post Post, board string) string {
+	if post.ArchivedMoeURL != "" {
+		return post.ArchivedMoeURL
+	}
+
+	// Construct URL based on source
+	switch a.config.Source {
+	case SourceFourChan:
+		if post.Tim != 0 && post.Ext != "" {
+			return fmt.Sprintf("%s/%s/%d%s", FourChanMediaBaseURL, board, post.Tim, post.Ext)
+		}
+	case SourceArchivedMoe:
+		if post.Filename != "" && post.Ext != "" {
+			return fmt.Sprintf("%s/%s/%s%s", ArchivedMoeBaseURL, board, post.Filename, post.Ext)
+		}
+	case Source4Plebs:
+		if post.Filename != "" && post.Ext != "" {
+			return fmt.Sprintf("%s/%s/image/%s%s", FourPlebsBaseURL, board, post.Filename, post.Ext)
+		}
+	}
+
+	return ""
+}
+
+// boolToInt converts boolean to integer (1 for true, 0 for false)
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// floatToSqlNull converts float64 to sql.NullFloat64
+func floatToSqlNull(f float64) sql.NullFloat64 {
+	if f == 0.0 {
+		return sql.NullFloat64{Valid: false}
+	}
+	return sql.NullFloat64{Float64: f, Valid: true}
+}
+
+// createEnhancedMarkdownExport creates markdown using the enhanced database approach
+func (a *Archiver) createEnhancedMarkdownExport(threadID, threadDir, markdownPath string) error {
+	// Determine database mode
+	var useMemoryDB bool
+	switch a.config.DatabaseMode {
+	case DatabaseModeMemory:
+		useMemoryDB = true
+	case DatabaseModeFile:
+		useMemoryDB = false
+	case DatabaseModeAuto:
+		// Auto-detect test mode
+		useMemoryDB = strings.Contains(threadDir, "_test_") || os.Getenv("GO_TEST_MODE") == "1"
+	default:
+		// Default to file-based
+		useMemoryDB = false
+	}
+
+	// Set database path
+	dbPath := filepath.Join(threadDir, ThreadDBFileName)
+	if useMemoryDB {
+		dbPath = ":memory:"
+	}
+
+	// Check if database exists (for file-based mode)
+	if !useMemoryDB {
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			return fmt.Errorf("database file not found: %s", dbPath)
+		}
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	// Use sqlc queries to generate enhanced markdown
+	queries := database.New(db)
+
+	// Generate enhanced markdown from database
+	err = a.CreateMarkdownFromDatabase(context.Background(), queries, threadID, a.config.Board, markdownPath)
+	if err != nil {
+		return fmt.Errorf("failed to create enhanced markdown: %w", err)
+	}
+
+	if a.config.Verbose {
+		fmt.Printf("✅ Created enhanced markdown export: %s\n", markdownPath)
+	}
+
 	return nil
 }

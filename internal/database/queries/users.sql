@@ -1,9 +1,9 @@
 -- name: CreateUser :one
 INSERT INTO users (
-    board, user_id, name, country, country_name, flag, flag_name,
-    first_seen, last_seen, post_count
+    board, user_id, name, tripcode, country, country_name, flag, flag_name,
+    first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING *;
 
 -- name: GetUser :one
@@ -17,14 +17,17 @@ WHERE board = ? AND user_id = ?;
 
 -- name: UpsertUser :exec
 INSERT INTO users (
-    board, user_id, name, country, country_name, flag, flag_name,
-    first_seen, last_seen, post_count
+    board, user_id, name, tripcode, country, country_name, flag, flag_name,
+    first_seen, last_seen, post_count, total_media_posts, avg_post_length, most_common_board
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?
 )
 ON CONFLICT(board, user_id) DO UPDATE SET
     last_seen = excluded.last_seen,
-    post_count = post_count + 1;
+    post_count = post_count + 1,
+    total_media_posts = excluded.total_media_posts,
+    avg_post_length = excluded.avg_post_length,
+    most_common_board = excluded.most_common_board;
 
 -- name: GetTopUsers :many
 SELECT * FROM users 
